@@ -1,0 +1,18 @@
+{
+  "name": "ニュース読み上げ",
+  "short_name": "ニュース読上",
+  "description": "犯罪・事件系を除いた最新ニュースを読み上げるアプリ",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14161f",
+  "theme_color": "#1b1f2b",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

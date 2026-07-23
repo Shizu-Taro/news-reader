@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#1b1f2b" />
+  <title>ニュース読み上げ</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/icon.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>📰 ニュース読み上げ</h1>
+    <p class="app-subtitle">犯罪・事件系を除いた最新ニュース</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <button id="play-all-btn" class="btn btn-primary" type="button">▶ すべて読み上げる</button>
+      <button id="stop-btn" class="btn" type="button" disabled>■ 停止</button>
+      <button id="refresh-btn" class="btn" type="button">⟳ 更新</button>
+    </section>
+
+    <section class="speed-control">
+      <label for="speed-range">読み上げ速度: <span id="speed-value">1.0</span>倍</label>
+      <input id="speed-range" type="range" min="0.5" max="2" step="0.1" value="1" />
+    </section>
+
+    <p id="status-line" class="status-line" aria-live="polite">読み込み中...</p>
+
+    <ul id="news-list" class="news-list"></ul>
+  </main>
+
+  <footer class="app-footer">
+    <p id="updated-at"></p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
