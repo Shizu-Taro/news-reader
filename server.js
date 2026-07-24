@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const path = require("path");
 const express = require("express");
 const Parser = require("rss-parser");
@@ -6,6 +8,8 @@ const { isCrimeArticle } = require("./public/newsFilter.js");
 const PORT = process.env.PORT || 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5分キャッシュ
 const MAX_ARTICLES = 40;
+const GOOGLE_TTS_API_KEY = process.env.GOOGLE_TTS_API_KEY || "";
+const TTS_CACHE_MAX_ENTRIES = 200;
 
 // 複数のRSSフィードを組み合わせて取得する
 const FEEDS = [
@@ -85,7 +89,61 @@ async function getNews({ forceRefresh = false } = {}) {
   return cache;
 }
 
+// Google Cloud Text-to-Speech で使えるボイス名のみ許可する(任意の文字列を
+// 外部APIにそのまま渡さないための簡易チェック)
+const ALLOWED_TTS_VOICES = new Set([
+  "ja-JP-Neural2-B",
+  "ja-JP-Neural2-C",
+  "ja-JP-Neural2-D",
+  "ja-JP-Wavenet-A",
+  "ja-JP-Wavenet-B",
+  "ja-JP-Wavenet-C",
+  "ja-JP-Wavenet-D",
+]);
+const DEFAULT_TTS_VOICE = "ja-JP-Neural2-B";
+
+const ttsCache = new Map();
+
+function clamp(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
+  const cacheKey = JSON.stringify({ text, voiceName, speakingRate, pitch });
+  const cached = ttsCache.get(cacheKey);
+  if (cached) return cached;
+
+  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_TTS_API_KEY}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      input: { text },
+      voice: { languageCode: "ja-JP", name: voiceName },
+      audioConfig: { audioEncoding: "MP3", speakingRate, pitch },
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`Google TTS API error ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const audioBuffer = Buffer.from(data.audioContent, "base64");
+
+  if (ttsCache.size >= TTS_CACHE_MAX_ENTRIES) {
+    ttsCache.delete(ttsCache.keys().next().value);
+  }
+  ttsCache.set(cacheKey, audioBuffer);
+
+  return audioBuffer;
+}
+
 const app = express();
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/news", async (req, res) => {
@@ -96,6 +154,34 @@ app.get("/api/news", async (req, res) => {
   } catch (err) {
     console.error("[news-reader] /api/news エラー:", err);
     res.status(500).json({ error: "ニュースの取得に失敗しました" });
+  }
+});
+
+app.post("/api/tts", async (req, res) => {
+  if (!GOOGLE_TTS_API_KEY) {
+    res.status(501).json({ error: "GOOGLE_TTS_API_KEY が設定されていません" });
+    return;
+  }
+
+  const text = typeof req.body?.text === "string" ? req.body.text.slice(0, 2000) : "";
+  if (!text.trim()) {
+    res.status(400).json({ error: "text が空です" });
+    return;
+  }
+
+  const voiceName = ALLOWED_TTS_VOICES.has(req.body?.voiceName)
+    ? req.body.voiceName
+    : DEFAULT_TTS_VOICE;
+  const speakingRate = clamp(req.body?.speakingRate, 0.5, 2.0, 1.0);
+  const pitch = clamp(req.body?.pitch, -10, 10, 0);
+
+  try {
+    const audioBuffer = await synthesizeSpeech({ text, voiceName, speakingRate, pitch });
+    res.set("Content-Type", "audio/mpeg");
+    res.send(audioBuffer);
+  } catch (err) {
+    console.error("[news-reader] /api/tts エラー:", err);
+    res.status(502).json({ error: "音声合成に失敗しました" });
   }
 });
 

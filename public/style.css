@@ -133,6 +133,12 @@ main {
   padding: 10px 14px;
 }
 
+.voice-mode-hint {
+  margin: 6px 2px 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
 .status-line {
   text-align: center;
   color: var(--text-muted);

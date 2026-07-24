@@ -8,6 +8,7 @@
   const pitchValue = document.getElementById("pitch-value");
   const voiceSelect = document.getElementById("voice-select");
   const voiceTestBtn = document.getElementById("voice-test-btn");
+  const voiceModeHint = document.getElementById("voice-mode-hint");
   const statusLine = document.getElementById("status-line");
   const newsList = document.getElementById("news-list");
   const updatedAtEl = document.getElementById("updated-at");
@@ -30,11 +31,27 @@
     (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
   ];
 
-  const VOICE_KEY = "news-reader-voice-v1";
+  const DEVICE_VOICE_KEY = "news-reader-voice-v1";
+  const CLOUD_VOICE_KEY = "news-reader-cloud-voice-v1";
+
+  // server.js に GOOGLE_TTS_API_KEY が設定されている場合に使える、
+  // Google Cloud Text-to-Speech の高品質な日本語音声
+  const CLOUD_VOICES = [
+    { name: "ja-JP-Neural2-B", label: "Neural2-B(女性・高品質)" },
+    { name: "ja-JP-Neural2-C", label: "Neural2-C(男性・高品質)" },
+    { name: "ja-JP-Neural2-D", label: "Neural2-D(男性・高品質)" },
+    { name: "ja-JP-Wavenet-A", label: "Wavenet-A(女性)" },
+    { name: "ja-JP-Wavenet-B", label: "Wavenet-B(女性)" },
+    { name: "ja-JP-Wavenet-C", label: "Wavenet-C(男性)" },
+    { name: "ja-JP-Wavenet-D", label: "Wavenet-D(男性)" },
+  ];
 
   let articles = [];
   let japaneseVoices = [];
   let selectedVoice = null;
+  let selectedCloudVoiceName = CLOUD_VOICES[0].name;
+  let ttsMode = "device"; // "cloud" | "device"
+  let currentAudio = null;
   let playQueueIndex = -1;
   let isPlayingAll = false;
   let isPlayingSingle = false;
@@ -51,7 +68,7 @@
     return score;
   }
 
-  function populateVoiceList() {
+  function populateDeviceVoiceList() {
     if (!speechSupported) return;
     const voices = synth.getVoices().filter((v) => v.lang && v.lang.startsWith("ja"));
     japaneseVoices = voices
@@ -60,7 +77,7 @@
 
     if (japaneseVoices.length === 0) return;
 
-    const savedName = localStorage.getItem(VOICE_KEY);
+    const savedName = localStorage.getItem(DEVICE_VOICE_KEY);
     voiceSelect.innerHTML = "";
     japaneseVoices.forEach((voice) => {
       const option = document.createElement("option");
@@ -74,10 +91,67 @@
     voiceSelect.value = selectedVoice.name;
   }
 
-  if (speechSupported) {
-    populateVoiceList();
-    synth.addEventListener("voiceschanged", populateVoiceList);
+  function populateCloudVoiceList() {
+    const savedName = localStorage.getItem(CLOUD_VOICE_KEY);
+    voiceSelect.innerHTML = "";
+    CLOUD_VOICES.forEach((voice) => {
+      const option = document.createElement("option");
+      option.value = voice.name;
+      option.textContent = voice.label;
+      voiceSelect.appendChild(option);
+    });
+    const saved = savedName && CLOUD_VOICES.find((v) => v.name === savedName);
+    selectedCloudVoiceName = (saved || CLOUD_VOICES[0]).name;
+    voiceSelect.value = selectedCloudVoiceName;
   }
+
+  // server.js の /api/tts に軽いリクエストを送り、Google Cloud TTSが
+  // 使える状態かどうかを判定する(空文字は400になるため、サーバーに
+  // 到達してAPIキーも設定されていれば400、キー未設定なら501が返る)
+  async function probeCloudTts() {
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "" }),
+      });
+      return res.status === 400;
+    } catch {
+      return false;
+    }
+  }
+
+  async function initVoiceMode() {
+    const cloudAvailable = await probeCloudTts();
+    if (cloudAvailable) {
+      ttsMode = "cloud";
+      populateCloudVoiceList();
+      voiceModeHint.textContent = "Google Cloudの高品質な音声を使用しています";
+    } else {
+      ttsMode = "device";
+      if (speechSupported) {
+        populateDeviceVoiceList();
+        voiceModeHint.textContent =
+          "端末組み込みの音声を使用しています(自前サーバーでGOOGLE_TTS_API_KEYを設定すると、より自然な音声が使えます)";
+      } else {
+        voiceModeHint.textContent = "";
+      }
+    }
+
+    if (!ttsAvailable()) {
+      playAllBtn.disabled = true;
+      voiceTestBtn.disabled = true;
+      voiceSelect.disabled = true;
+      setStatus("お使いのブラウザは読み上げに対応していません");
+    }
+  }
+
+  if (speechSupported) {
+    synth.addEventListener("voiceschanged", () => {
+      if (ttsMode === "device") populateDeviceVoiceList();
+    });
+  }
+  initVoiceMode();
 
   function setStatus(text) {
     statusLine.textContent = text;
@@ -103,7 +177,43 @@
     return parts;
   }
 
-  function speakOne(text) {
+  function pitchSemitones() {
+    // 声の高さスライダー(0.5〜1.5、1.0が標準)をGoogle Cloud TTSの
+    // ピッチ単位(半音、-20〜20)に変換する
+    return (parseFloat(pitchRange.value) - 1) * 20;
+  }
+
+  async function speakOneCloud(text) {
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          voiceName: selectedCloudVoiceName,
+          speakingRate: parseFloat(speedRange.value) || 1,
+          pitch: pitchSemitones(),
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      await new Promise((resolve) => {
+        const audio = new Audio(objectUrl);
+        currentAudio = audio;
+        audio.onended = resolve;
+        audio.onerror = resolve;
+        audio.play().catch(resolve);
+      });
+      URL.revokeObjectURL(objectUrl);
+      currentAudio = null;
+    } catch (err) {
+      console.error("[news-reader] クラウド音声の再生に失敗しました:", err);
+      currentAudio = null;
+    }
+  }
+
+  function speakOneDevice(text) {
     return new Promise((resolve) => {
       if (!speechSupported) {
         resolve();
@@ -120,11 +230,19 @@
     });
   }
 
+  function speakOne(text) {
+    return ttsMode === "cloud" ? speakOneCloud(text) : speakOneDevice(text);
+  }
+
   const PAUSE_BETWEEN_PARTS_MS = 250;
   let playToken = 0;
 
+  function ttsAvailable() {
+    return ttsMode === "cloud" || speechSupported;
+  }
+
   async function speak(parts, token, { onend } = {}) {
-    if (!speechSupported) return;
+    if (!ttsAvailable()) return;
     for (let i = 0; i < parts.length; i++) {
       await speakOne(parts[i]);
       if (token !== playToken) return; // 途中で停止/次の再生が開始された
@@ -149,6 +267,11 @@
   function stopAll() {
     playToken += 1; // 実行中の発話チェーンを無効化する
     if (speechSupported) synth.cancel();
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+      currentAudio = null;
+    }
     isPlayingAll = false;
     isPlayingSingle = false;
     playQueueIndex = -1;
@@ -173,14 +296,14 @@
   }
 
   function startPlayAll() {
-    if (!speechSupported) {
+    if (!ttsAvailable()) {
       setStatus("お使いのブラウザは読み上げに対応していません");
       return;
     }
     if (articles.length === 0) return;
     playToken += 1;
     const token = playToken;
-    synth.cancel();
+    if (speechSupported) synth.cancel();
     isPlayingAll = true;
     isPlayingSingle = false;
     playQueueIndex = -1;
@@ -190,13 +313,13 @@
   }
 
   function playSingle(index) {
-    if (!speechSupported) {
+    if (!ttsAvailable()) {
       setStatus("お使いのブラウザは読み上げに対応していません");
       return;
     }
     playToken += 1;
     const token = playToken;
-    synth.cancel();
+    if (speechSupported) synth.cancel();
     isPlayingAll = false;
     isPlayingSingle = true;
     highlightItem(index);
@@ -420,10 +543,17 @@
   });
 
   voiceSelect.addEventListener("change", () => {
-    const voice = japaneseVoices.find((v) => v.name === voiceSelect.value);
-    if (!voice) return;
-    selectedVoice = voice;
-    localStorage.setItem(VOICE_KEY, voice.name);
+    if (ttsMode === "cloud") {
+      const voice = CLOUD_VOICES.find((v) => v.name === voiceSelect.value);
+      if (!voice) return;
+      selectedCloudVoiceName = voice.name;
+      localStorage.setItem(CLOUD_VOICE_KEY, voice.name);
+    } else {
+      const voice = japaneseVoices.find((v) => v.name === voiceSelect.value);
+      if (!voice) return;
+      selectedVoice = voice;
+      localStorage.setItem(DEVICE_VOICE_KEY, voice.name);
+    }
   });
 
   voiceTestBtn.addEventListener("click", () => {
@@ -431,13 +561,6 @@
     if (speechSupported) synth.cancel();
     speak(["これはテスト再生です。ニュースはこのような声で読み上げられます。"], playToken);
   });
-
-  if (!speechSupported) {
-    playAllBtn.disabled = true;
-    voiceTestBtn.disabled = true;
-    voiceSelect.disabled = true;
-    setStatus("お使いのブラウザは読み上げ(Web Speech API)に対応していません");
-  }
 
   loadNews();
 
