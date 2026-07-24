@@ -183,8 +183,12 @@
     return (parseFloat(pitchRange.value) - 1) * 20;
   }
 
-  // Google Cloud TTS側はサーバーでSSMLの<break>に変換してもらうため、
-  // テキストをそのまま渡せば1回のリクエストでスペースごとの間が入る
+  // スペース(半角・全角)を句読点の「、」と同じ読み方にするため、
+  // 読み上げ前にテキスト側で置き換えてしまう(サーバー側でも同様に変換される)
+  function spacesToComma(text) {
+    return text.replace(/[ 　]+/g, "、");
+  }
+
   async function speakOneCloud(text, token) {
     try {
       const res = await fetch("/api/tts", {
@@ -216,9 +220,13 @@
     }
   }
 
-  function speakUtterance(text) {
+  function speakOneDevice(text) {
     return new Promise((resolve) => {
-      const utterance = new SpeechSynthesisUtterance(text);
+      if (!speechSupported) {
+        resolve();
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(spacesToComma(text));
       utterance.lang = (selectedVoice && selectedVoice.lang) || "ja-JP";
       if (selectedVoice) utterance.voice = selectedVoice;
       utterance.rate = parseFloat(speedRange.value) || 1;
@@ -229,26 +237,8 @@
     });
   }
 
-  const WORD_PAUSE_MS = 150;
-
-  // Web Speech APIはSSMLの間(ま)が使えないため、スペースで区切って
-  // 短い発話に分け、その間に一拍おく
-  async function speakOneDevice(text, token) {
-    if (!speechSupported) return;
-    const words = text.split(/[ 　]+/).filter(Boolean);
-    const segments = words.length > 0 ? words : [text];
-    for (let i = 0; i < segments.length; i++) {
-      await speakUtterance(segments[i]);
-      if (token !== playToken) return;
-      if (i < segments.length - 1) {
-        await new Promise((r) => setTimeout(r, WORD_PAUSE_MS));
-        if (token !== playToken) return;
-      }
-    }
-  }
-
   function speakOne(text, token) {
-    return ttsMode === "cloud" ? speakOneCloud(text, token) : speakOneDevice(text, token);
+    return ttsMode === "cloud" ? speakOneCloud(text, token) : speakOneDevice(text);
   }
 
   const PAUSE_BETWEEN_PARTS_MS = 250;
