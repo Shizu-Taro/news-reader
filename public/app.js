@@ -11,6 +11,21 @@
   const synth = window.speechSynthesis;
   const speechSupported = !!synth;
 
+  // 自前サーバー (server.js) が動いていない場合でもブラウザだけで動かせるよう、
+  // 公開のCORSプロキシ経由でRSSを直接取得するフォールバックを用意する
+  const CACHE_KEY = "news-reader-cache-v1";
+  const CACHE_TTL_MS = 5 * 60 * 1000;
+  const MAX_ARTICLES = 40;
+  const FEEDS = [
+    { url: "https://www3.nhk.or.jp/rss/news/cat0.xml", source: "NHKニュース" },
+    { url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml", source: "Yahoo!ニュース" },
+    { url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja", source: "Googleニュース" },
+  ];
+  const CORS_PROXIES = [
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+  ];
+
   let articles = [];
   let japaneseVoice = null;
   let playQueueIndex = -1;
@@ -169,13 +184,135 @@
     });
   }
 
+  function stripHtml(html) {
+    if (!html) return "";
+    return html.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeTitle(title) {
+    return (title || "").trim().toLowerCase();
+  }
+
+  // server.js が動いている場合はそちらを優先する(自前サーバーなので信頼性が高い)。
+  // 到達できなければ null を返し、ブラウザ単体のフォールバックに進む。
+  async function fetchFromOwnApi(forceRefresh) {
+    try {
+      const res = await fetch(`/api/news${forceRefresh ? "?refresh=1" : ""}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || !Array.isArray(data.articles)) return null;
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  async function fetchRssViaProxy(url) {
+    let lastErr;
+    for (const buildProxyUrl of CORS_PROXIES) {
+      try {
+        const res = await fetch(buildProxyUrl(url), { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        if (!text || text.length < 20) throw new Error("empty response");
+        return text;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error("all proxies failed");
+  }
+
+  function parseRssItems(xmlText, sourceName) {
+    const doc = new DOMParser().parseFromString(xmlText, "text/xml");
+    if (doc.querySelector("parsererror")) throw new Error("XML parse error");
+    return Array.from(doc.querySelectorAll("item")).map((item) => ({
+      title: (item.querySelector("title")?.textContent || "").trim(),
+      link: (item.querySelector("link")?.textContent || "").trim(),
+      source: sourceName,
+      pubDate: item.querySelector("pubDate")?.textContent?.trim() || null,
+      summary: stripHtml(item.querySelector("description")?.textContent || ""),
+    }));
+  }
+
+  function mergeFilterAndSort(articleLists) {
+    const merged = articleLists.flat();
+
+    const seenTitles = new Set();
+    const deduped = [];
+    for (const article of merged) {
+      if (!article.title || !article.link) continue;
+      const key = normalizeTitle(article.title);
+      if (seenTitles.has(key)) continue;
+      seenTitles.add(key);
+      deduped.push(article);
+    }
+
+    const filtered = deduped.filter(
+      (article) =>
+        !window.NewsFilter.isCrimeArticle(article.title) &&
+        !window.NewsFilter.isCrimeArticle(article.summary)
+    );
+
+    filtered.sort((a, b) => {
+      const dateA = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+      const dateB = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+      return dateB - dateA;
+    });
+
+    return filtered.slice(0, MAX_ARTICLES);
+  }
+
+  function readCache() {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeCache(data) {
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+    } catch {
+      // ストレージが使えなくても無視する(読み上げ自体には影響しない)
+    }
+  }
+
+  // 自前サーバーなしでブラウザだけで動かすためのフォールバック。
+  // 公開のCORSプロキシを経由するため、自前サーバー経由より信頼性は落ちる。
+  async function fetchNewsClientSide(forceRefresh) {
+    if (!forceRefresh) {
+      const cached = readCache();
+      if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+        return { updatedAt: new Date(cached.fetchedAt).toISOString(), articles: cached.articles };
+      }
+    }
+
+    const settled = await Promise.allSettled(
+      FEEDS.map(async (feed) => parseRssItems(await fetchRssViaProxy(feed.url), feed.source))
+    );
+    const succeeded = settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
+    if (succeeded.length === 0) {
+      throw new Error("すべてのニュース取得元への接続に失敗しました");
+    }
+
+    const articlesResult = mergeFilterAndSort(succeeded);
+    const fetchedAt = Date.now();
+    writeCache({ fetchedAt, articles: articlesResult });
+    return { updatedAt: new Date(fetchedAt).toISOString(), articles: articlesResult };
+  }
+
   async function loadNews({ forceRefresh = false } = {}) {
     setStatus("読み込み中...");
     refreshBtn.disabled = true;
     try {
-      const res = await fetch(`/api/news${forceRefresh ? "?refresh=1" : ""}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data =
+        (await fetchFromOwnApi(forceRefresh)) || (await fetchNewsClientSide(forceRefresh));
       articles = data.articles || [];
       renderArticles();
       setStatus(

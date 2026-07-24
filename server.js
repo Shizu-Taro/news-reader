@@ -1,7 +1,7 @@
 const path = require("path");
 const express = require("express");
 const Parser = require("rss-parser");
-const { isCrimeArticle } = require("./lib/newsFilter");
+const { isCrimeArticle } = require("./public/newsFilter.js");
 
 const PORT = process.env.PORT || 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5分キャッシュ

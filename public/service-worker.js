@@ -4,6 +4,7 @@ const SHELL_FILES = [
   "/index.html",
   "/style.css",
   "/app.js",
+  "/newsFilter.js",
   "/manifest.json",
   "/icons/icon.svg",
 ];
@@ -29,6 +30,9 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (request.method !== "GET" || request.url.includes("/api/")) return;
+  // ニュース本体(自前APIやCORSプロキシ経由のRSS)は常に最新を取りに行くため、
+  // アプリの見た目を構成する同一オリジンのファイルだけをキャッシュ対象にする
+  if (new URL(request.url).origin !== self.location.origin) return;
 
   event.respondWith(
     caches.match(request).then((cached) => {
