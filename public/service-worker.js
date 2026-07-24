@@ -1,4 +1,4 @@
-const CACHE_NAME = "news-reader-shell-v1";
+const CACHE_NAME = "news-reader-shell-v2";
 const SHELL_FILES = [
   "/",
   "/index.html",
@@ -34,18 +34,17 @@ self.addEventListener("fetch", (event) => {
   // アプリの見た目を構成する同一オリジンのファイルだけをキャッシュ対象にする
   if (new URL(request.url).origin !== self.location.origin) return;
 
+  // アプリの見た目は更新のたびに変わりうるので、まずネットワークから
+  // 最新版を取りに行き、オフライン時のみキャッシュにフォールバックする
   event.respondWith(
-    caches.match(request).then((cached) => {
-      const network = fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          }
-          return response;
-        })
-        .catch(() => cached);
-      return cached || network;
-    })
+    fetch(request)
+      .then((response) => {
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+        }
+        return response;
+      })
+      .catch(() => caches.match(request))
   );
 });
