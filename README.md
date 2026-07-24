@@ -33,7 +33,9 @@ npm start
 
 ### 方法1: Google Cloud Text-to-Speech を使う(おすすめ・要サーバー起動)
 
-サーバーモード(上記B)で `GOOGLE_TTS_API_KEY` を設定すると、Web Speech APIの代わりに Google Cloud の高品質な音声(Neural2 / Wavenet)で読み上げるようになります。ブラウザ単体モード(A)では、APIキーを安全に扱えないため使えません。
+サーバーモード(上記B)で `GOOGLE_TTS_API_KEY` を設定すると、Web Speech APIの代わりに Google Cloud の高品質な音声で読み上げるようになります。ブラウザ単体モード(A)では、APIキーを安全に扱えないため使えません。
+
+使えるボイスの一覧はハードコードせず、サーバーが起動時にGoogle Cloud側へ毎回問い合わせて取得します。そのため **Chirp3-HD**(最新の生成AIベースの音声。従来のNeural2/Wavenetよりさらに自然で、月100万文字までの無料枠あり)が使える環境では自動的に選択肢に表示され、品質の高い順(Chirp3-HD > Studio > Neural2 > Wavenet > Standard)に並びます。画面上部の「読み上げ音声」から選んでください。
 
 1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成
 2. 「APIとサービス」→「ライブラリ」で **Cloud Text-to-Speech API** を有効化(初回は課金アカウントの登録が必要ですが、無料枠(標準音声は月400万文字、Neural2/Wavenetは月100万文字程度)内であれば課金されません)

@@ -34,22 +34,11 @@
   const DEVICE_VOICE_KEY = "news-reader-voice-v1";
   const CLOUD_VOICE_KEY = "news-reader-cloud-voice-v1";
 
-  // server.js に GOOGLE_TTS_API_KEY が設定されている場合に使える、
-  // Google Cloud Text-to-Speech の高品質な日本語音声
-  const CLOUD_VOICES = [
-    { name: "ja-JP-Neural2-B", label: "Neural2-B(女性・高品質)" },
-    { name: "ja-JP-Neural2-C", label: "Neural2-C(男性・高品質)" },
-    { name: "ja-JP-Neural2-D", label: "Neural2-D(男性・高品質)" },
-    { name: "ja-JP-Wavenet-A", label: "Wavenet-A(女性)" },
-    { name: "ja-JP-Wavenet-B", label: "Wavenet-B(女性)" },
-    { name: "ja-JP-Wavenet-C", label: "Wavenet-C(男性)" },
-    { name: "ja-JP-Wavenet-D", label: "Wavenet-D(男性)" },
-  ];
-
   let articles = [];
   let japaneseVoices = [];
   let selectedVoice = null;
-  let selectedCloudVoiceName = CLOUD_VOICES[0].name;
+  let cloudVoices = []; // server.js の /api/tts/voices から取得した実際の日本語ボイス一覧
+  let selectedCloudVoiceName = null;
   let ttsMode = "device"; // "cloud" | "device"
   let currentAudio = null;
   let playQueueIndex = -1;
@@ -91,40 +80,64 @@
     voiceSelect.value = selectedVoice.name;
   }
 
+  // ボイス名から世代・品質のランクを判定する(新しい世代ほど自然な声)
+  function classifyVoiceTier(name) {
+    if (/chirp3-hd/i.test(name)) return { tier: 4, label: "Chirp3-HD" };
+    if (/studio/i.test(name)) return { tier: 3, label: "Studio" };
+    if (/neural2/i.test(name)) return { tier: 2, label: "Neural2" };
+    if (/wavenet/i.test(name)) return { tier: 1, label: "Wavenet" };
+    return { tier: 0, label: "Standard" };
+  }
+
+  const GENDER_LABELS = { FEMALE: "女性", MALE: "男性", NEUTRAL: "" };
+
+  function voiceDisplayLabel(voice) {
+    const shortName = voice.name.replace(/^ja-JP-/, "");
+    const genderLabel = GENDER_LABELS[voice.gender] || "";
+    return genderLabel ? `${shortName}(${genderLabel})` : shortName;
+  }
+
+  function sortVoicesByQuality(voices) {
+    return voices.slice().sort((a, b) => {
+      const diff = classifyVoiceTier(b.name).tier - classifyVoiceTier(a.name).tier;
+      return diff !== 0 ? diff : a.name.localeCompare(b.name);
+    });
+  }
+
   function populateCloudVoiceList() {
     const savedName = localStorage.getItem(CLOUD_VOICE_KEY);
     voiceSelect.innerHTML = "";
-    CLOUD_VOICES.forEach((voice) => {
+    cloudVoices.forEach((voice) => {
       const option = document.createElement("option");
       option.value = voice.name;
-      option.textContent = voice.label;
+      option.textContent = voiceDisplayLabel(voice);
       voiceSelect.appendChild(option);
     });
-    const saved = savedName && CLOUD_VOICES.find((v) => v.name === savedName);
-    selectedCloudVoiceName = (saved || CLOUD_VOICES[0]).name;
+    const saved = savedName && cloudVoices.find((v) => v.name === savedName);
+    selectedCloudVoiceName = (saved || cloudVoices[0]).name;
     voiceSelect.value = selectedCloudVoiceName;
   }
 
-  // server.js の /api/tts に軽いリクエストを送り、Google Cloud TTSが
-  // 使える状態かどうかを判定する(空文字は400になるため、サーバーに
-  // 到達してAPIキーも設定されていれば400、キー未設定なら501が返る)
-  async function probeCloudTts() {
+  // server.js の /api/tts/voices からGoogle Cloud TTSの実際の日本語ボイス
+  // 一覧を取得する。取得できればそれ自体が「利用可能」の判定にもなる
+  // (APIキー未設定なら501、サーバーが無ければfetch自体が失敗する)
+  async function fetchCloudVoices() {
     try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: "" }),
-      });
-      return res.status === 400;
+      const res = await fetch("/api/tts/voices");
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || !Array.isArray(data.voices) || data.voices.length === 0) return null;
+      return data.voices;
     } catch {
-      return false;
+      return null;
     }
   }
 
   async function initVoiceMode() {
-    const cloudAvailable = await probeCloudTts();
-    if (cloudAvailable) {
+    const voices = await fetchCloudVoices();
+    if (voices) {
       ttsMode = "cloud";
+      cloudVoices = sortVoicesByQuality(voices);
       populateCloudVoiceList();
       voiceModeHint.textContent = "Google Cloudの高品質な音声を使用しています";
     } else {
@@ -551,7 +564,7 @@
 
   voiceSelect.addEventListener("change", () => {
     if (ttsMode === "cloud") {
-      const voice = CLOUD_VOICES.find((v) => v.name === voiceSelect.value);
+      const voice = cloudVoices.find((v) => v.name === voiceSelect.value);
       if (!voice) return;
       selectedCloudVoiceName = voice.name;
       localStorage.setItem(CLOUD_VOICE_KEY, voice.name);

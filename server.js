@@ -89,9 +89,11 @@ async function getNews({ forceRefresh = false } = {}) {
   return cache;
 }
 
-// Google Cloud Text-to-Speech で使えるボイス名のみ許可する(任意の文字列を
-// 外部APIにそのまま渡さないための簡易チェック)
-const ALLOWED_TTS_VOICES = new Set([
+// Google Cloud Text-to-Speech の日本語ボイス一覧は、ハードコードせずAPIに
+// 都度問い合わせる(Chirp3-HDなど新しい声が追加されても自動的に使えるように)。
+// キーが有効でも一覧取得に失敗した場合の最後の砦として、動作確認済みの
+// ボイス名だけは静的にも保持しておく。
+const FALLBACK_TTS_VOICES = new Set([
   "ja-JP-Neural2-B",
   "ja-JP-Neural2-C",
   "ja-JP-Neural2-D",
@@ -101,6 +103,32 @@ const ALLOWED_TTS_VOICES = new Set([
   "ja-JP-Wavenet-D",
 ]);
 const DEFAULT_TTS_VOICE = "ja-JP-Neural2-B";
+const VOICE_LIST_TTL_MS = 60 * 60 * 1000; // 1時間キャッシュ(声の一覧は頻繁には変わらない)
+
+let voiceListCache = { fetchedAt: 0, voices: [] };
+
+async function fetchAvailableVoices() {
+  if (
+    voiceListCache.voices.length > 0 &&
+    Date.now() - voiceListCache.fetchedAt < VOICE_LIST_TTL_MS
+  ) {
+    return voiceListCache.voices;
+  }
+
+  const url = `https://texttospeech.googleapis.com/v1/voices?languageCode=ja-JP&key=${GOOGLE_TTS_API_KEY}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => "");
+    throw new Error(`List voices failed ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const voices = (data.voices || [])
+    .filter((v) => Array.isArray(v.languageCodes) && v.languageCodes.includes("ja-JP"))
+    .map((v) => ({ name: v.name, gender: v.ssmlGender }));
+
+  voiceListCache = { fetchedAt: Date.now(), voices };
+  return voices;
+}
 
 const ttsCache = new Map();
 
@@ -163,6 +191,20 @@ app.get("/api/news", async (req, res) => {
   }
 });
 
+app.get("/api/tts/voices", async (req, res) => {
+  if (!GOOGLE_TTS_API_KEY) {
+    res.status(501).json({ error: "GOOGLE_TTS_API_KEY が設定されていません" });
+    return;
+  }
+  try {
+    const voices = await fetchAvailableVoices();
+    res.json({ voices });
+  } catch (err) {
+    console.error("[news-reader] /api/tts/voices エラー:", err);
+    res.status(502).json({ error: "音声一覧の取得に失敗しました" });
+  }
+});
+
 app.post("/api/tts", async (req, res) => {
   if (!GOOGLE_TTS_API_KEY) {
     res.status(501).json({ error: "GOOGLE_TTS_API_KEY が設定されていません" });
@@ -175,9 +217,21 @@ app.post("/api/tts", async (req, res) => {
     return;
   }
 
-  const voiceName = ALLOWED_TTS_VOICES.has(req.body?.voiceName)
-    ? req.body.voiceName
-    : DEFAULT_TTS_VOICE;
+  const requestedVoice = req.body?.voiceName;
+  let voiceName = DEFAULT_TTS_VOICE;
+  try {
+    const voices = await fetchAvailableVoices();
+    const names = new Set(voices.map((v) => v.name));
+    if (names.has(requestedVoice)) {
+      voiceName = requestedVoice;
+    } else if (voices.length > 0) {
+      voiceName = voices[0].name;
+    }
+  } catch (err) {
+    console.error("[news-reader] 音声一覧の取得に失敗したためフォールバックします:", err);
+    if (FALLBACK_TTS_VOICES.has(requestedVoice)) voiceName = requestedVoice;
+  }
+
   const speakingRate = clamp(req.body?.speakingRate, 0.5, 2.0, 1.0);
   const pitch = clamp(req.body?.pitch, -10, 10, 0);
 
