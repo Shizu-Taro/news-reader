@@ -183,7 +183,9 @@
     return (parseFloat(pitchRange.value) - 1) * 20;
   }
 
-  async function speakOneCloud(text) {
+  // Google Cloud TTS側はサーバーでSSMLの<break>に変換してもらうため、
+  // テキストをそのまま渡せば1回のリクエストでスペースごとの間が入る
+  async function speakOneCloud(text, token) {
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -197,6 +199,7 @@
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
+      if (token !== playToken) return; // 取得中に停止/次の再生が始まった
       const objectUrl = URL.createObjectURL(blob);
       await new Promise((resolve) => {
         const audio = new Audio(objectUrl);
@@ -213,12 +216,8 @@
     }
   }
 
-  function speakOneDevice(text) {
+  function speakUtterance(text) {
     return new Promise((resolve) => {
-      if (!speechSupported) {
-        resolve();
-        return;
-      }
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = (selectedVoice && selectedVoice.lang) || "ja-JP";
       if (selectedVoice) utterance.voice = selectedVoice;
@@ -230,8 +229,26 @@
     });
   }
 
-  function speakOne(text) {
-    return ttsMode === "cloud" ? speakOneCloud(text) : speakOneDevice(text);
+  const WORD_PAUSE_MS = 150;
+
+  // Web Speech APIはSSMLの間(ま)が使えないため、スペースで区切って
+  // 短い発話に分け、その間に一拍おく
+  async function speakOneDevice(text, token) {
+    if (!speechSupported) return;
+    const words = text.split(/[ 　]+/).filter(Boolean);
+    const segments = words.length > 0 ? words : [text];
+    for (let i = 0; i < segments.length; i++) {
+      await speakUtterance(segments[i]);
+      if (token !== playToken) return;
+      if (i < segments.length - 1) {
+        await new Promise((r) => setTimeout(r, WORD_PAUSE_MS));
+        if (token !== playToken) return;
+      }
+    }
+  }
+
+  function speakOne(text, token) {
+    return ttsMode === "cloud" ? speakOneCloud(text, token) : speakOneDevice(text, token);
   }
 
   const PAUSE_BETWEEN_PARTS_MS = 250;
@@ -244,7 +261,7 @@
   async function speak(parts, token, { onend } = {}) {
     if (!ttsAvailable()) return;
     for (let i = 0; i < parts.length; i++) {
-      await speakOne(parts[i]);
+      await speakOne(parts[i], token);
       if (token !== playToken) return; // 途中で停止/次の再生が開始された
       if (i < parts.length - 1) {
         await new Promise((r) => setTimeout(r, PAUSE_BETWEEN_PARTS_MS));

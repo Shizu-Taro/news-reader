@@ -110,6 +110,20 @@ function clamp(value, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+const SPACE_BREAK_MS = 200;
+
+// スペース(半角・全角)がある箇所で一拍おけるよう、SSMLの<break>タグに変換する
+function textToSsml(text) {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+  const withBreaks = escaped.replace(/[ 　]+/g, ` <break time="${SPACE_BREAK_MS}ms"/> `);
+  return `<speak>${withBreaks}</speak>`;
+}
+
 async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
   const cacheKey = JSON.stringify({ text, voiceName, speakingRate, pitch });
   const cached = ttsCache.get(cacheKey);
@@ -120,7 +134,7 @@ async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      input: { text },
+      input: { ssml: textToSsml(text) },
       voice: { languageCode: "ja-JP", name: voiceName },
       audioConfig: { audioEncoding: "MP3", speakingRate, pitch },
     }),
