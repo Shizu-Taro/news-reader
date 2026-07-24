@@ -197,9 +197,15 @@
   }
 
   // スペース(半角・全角)を句読点の「、」と同じ読み方にするため、
-  // 読み上げ前にテキスト側で置き換えてしまう(サーバー側でも同様に変換される)
+  // 読み上げ前にテキスト側で置き換えてしまう(サーバー側でも同様に変換される)。
+  // ただし英単語同士の間のスペース(例: "Machine Learning")はそのまま読ませたい
+  // ので変換しない。
+  const SPACE_PLACEHOLDER = String.fromCharCode(0xe000);
+
   function spacesToComma(text) {
-    return text.replace(/[ 　]+/g, "、");
+    const protectedText = text.replace(/(?<=[A-Za-z])[ 　]+(?=[A-Za-z])/g, SPACE_PLACEHOLDER);
+    const converted = protectedText.replace(/[ 　]+/g, "、");
+    return converted.split(SPACE_PLACEHOLDER).join(" ");
   }
 
   async function speakOneCloud(text, token) {

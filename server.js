@@ -139,9 +139,14 @@ function clamp(value, min, max, fallback) {
 }
 
 // スペース(半角・全角)を句読点の「、」と同じ読み方にするため、
-// 送信前にテキスト側で置き換えてしまう
+// 送信前にテキスト側で置き換えてしまう。ただし英単語同士の間のスペース
+// (例: "Machine Learning")は、そのまま読ませたいので変換しない。
+const SPACE_PLACEHOLDER = String.fromCharCode(0xe000);
+
 function spacesToComma(text) {
-  return text.replace(/[ 　]+/g, "、");
+  const protectedText = text.replace(/(?<=[A-Za-z])[ 　]+(?=[A-Za-z])/g, SPACE_PLACEHOLDER);
+  const converted = protectedText.replace(/[ 　]+/g, "、");
+  return converted.split(SPACE_PLACEHOLDER).join(" ");
 }
 
 async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
