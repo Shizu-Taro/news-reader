@@ -100,6 +100,39 @@ main {
   width: 100%;
 }
 
+.voice-control {
+  margin: 4px 4px 16px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.voice-control label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.voice-row {
+  display: flex;
+  gap: 8px;
+}
+
+.voice-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px;
+  border-radius: var(--radius);
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.voice-row .btn {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 10px 14px;
+}
+
 .status-line {
   text-align: center;
   color: var(--text-muted);

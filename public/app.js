@@ -4,6 +4,10 @@
   const refreshBtn = document.getElementById("refresh-btn");
   const speedRange = document.getElementById("speed-range");
   const speedValue = document.getElementById("speed-value");
+  const pitchRange = document.getElementById("pitch-range");
+  const pitchValue = document.getElementById("pitch-value");
+  const voiceSelect = document.getElementById("voice-select");
+  const voiceTestBtn = document.getElementById("voice-test-btn");
   const statusLine = document.getElementById("status-line");
   const newsList = document.getElementById("news-list");
   const updatedAtEl = document.getElementById("updated-at");
@@ -26,24 +30,53 @@
     (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
   ];
 
+  const VOICE_KEY = "news-reader-voice-v1";
+
   let articles = [];
-  let japaneseVoice = null;
+  let japaneseVoices = [];
+  let selectedVoice = null;
   let playQueueIndex = -1;
   let isPlayingAll = false;
   let isPlayingSingle = false;
 
-  function pickJapaneseVoice() {
+  // 端末に入っている音声エンジンの質はまちまちなので、名前から品質の高そうな
+  // 音声(ネットワーク音声・高品質版など)を優先的にデフォルト選択する
+  function voiceQualityScore(voice) {
+    const name = voice.name || "";
+    let score = 0;
+    if (/google/i.test(name)) score += 3;
+    if (/enhanced|premium|neural|natural|wavenet/i.test(name)) score += 3;
+    if (/kyoko|otoya|o-ren|siri/i.test(name)) score += 2;
+    if (voice.lang === "ja-JP") score += 1;
+    return score;
+  }
+
+  function populateVoiceList() {
     if (!speechSupported) return;
-    const voices = synth.getVoices();
-    japaneseVoice =
-      voices.find((v) => v.lang === "ja-JP") ||
-      voices.find((v) => v.lang && v.lang.startsWith("ja")) ||
-      null;
+    const voices = synth.getVoices().filter((v) => v.lang && v.lang.startsWith("ja"));
+    japaneseVoices = voices
+      .slice()
+      .sort((a, b) => voiceQualityScore(b) - voiceQualityScore(a) || a.name.localeCompare(b.name));
+
+    if (japaneseVoices.length === 0) return;
+
+    const savedName = localStorage.getItem(VOICE_KEY);
+    voiceSelect.innerHTML = "";
+    japaneseVoices.forEach((voice) => {
+      const option = document.createElement("option");
+      option.value = voice.name;
+      option.textContent = voice.name;
+      voiceSelect.appendChild(option);
+    });
+
+    const savedVoice = savedName && japaneseVoices.find((v) => v.name === savedName);
+    selectedVoice = savedVoice || japaneseVoices[0];
+    voiceSelect.value = selectedVoice.name;
   }
 
   if (speechSupported) {
-    pickJapaneseVoice();
-    synth.addEventListener("voiceschanged", pickJapaneseVoice);
+    populateVoiceList();
+    synth.addEventListener("voiceschanged", populateVoiceList);
   }
 
   function setStatus(text) {
@@ -62,21 +95,45 @@
     });
   }
 
-  function buildUtteranceText(article) {
+  function buildUtteranceParts(article) {
+    // タイトルと本文を別々の発話に分けることで、一続きで読み上げるより
+    // 自然な「間」ができる
     const parts = [article.title];
     if (article.summary) parts.push(article.summary);
-    return parts.join("。 ");
+    return parts;
   }
 
-  function speak(text, { onend } = {}) {
+  function speakOne(text) {
+    return new Promise((resolve) => {
+      if (!speechSupported) {
+        resolve();
+        return;
+      }
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = (selectedVoice && selectedVoice.lang) || "ja-JP";
+      if (selectedVoice) utterance.voice = selectedVoice;
+      utterance.rate = parseFloat(speedRange.value) || 1;
+      utterance.pitch = parseFloat(pitchRange.value) || 1;
+      utterance.onend = () => resolve();
+      utterance.onerror = () => resolve();
+      synth.speak(utterance);
+    });
+  }
+
+  const PAUSE_BETWEEN_PARTS_MS = 250;
+  let playToken = 0;
+
+  async function speak(parts, token, { onend } = {}) {
     if (!speechSupported) return;
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "ja-JP";
-    if (japaneseVoice) utterance.voice = japaneseVoice;
-    utterance.rate = parseFloat(speedRange.value) || 1;
-    utterance.onend = () => onend && onend();
-    utterance.onerror = () => onend && onend();
-    synth.speak(utterance);
+    for (let i = 0; i < parts.length; i++) {
+      await speakOne(parts[i]);
+      if (token !== playToken) return; // 途中で停止/次の再生が開始された
+      if (i < parts.length - 1) {
+        await new Promise((r) => setTimeout(r, PAUSE_BETWEEN_PARTS_MS));
+        if (token !== playToken) return;
+      }
+    }
+    onend && onend();
   }
 
   function highlightItem(index) {
@@ -90,6 +147,7 @@
   }
 
   function stopAll() {
+    playToken += 1; // 実行中の発話チェーンを無効化する
     if (speechSupported) synth.cancel();
     isPlayingAll = false;
     isPlayingSingle = false;
@@ -100,7 +158,8 @@
     setStatus(`${articles.length}件のニュースがあります`);
   }
 
-  function playNextInQueue() {
+  function playNextInQueue(token) {
+    if (token !== playToken) return;
     playQueueIndex += 1;
     if (playQueueIndex >= articles.length) {
       stopAll();
@@ -108,7 +167,9 @@
     }
     highlightItem(playQueueIndex);
     setStatus(`読み上げ中: ${playQueueIndex + 1} / ${articles.length}`);
-    speak(buildUtteranceText(articles[playQueueIndex]), { onend: playNextInQueue });
+    speak(buildUtteranceParts(articles[playQueueIndex]), token, {
+      onend: () => playNextInQueue(token),
+    });
   }
 
   function startPlayAll() {
@@ -117,13 +178,15 @@
       return;
     }
     if (articles.length === 0) return;
+    playToken += 1;
+    const token = playToken;
     synth.cancel();
     isPlayingAll = true;
     isPlayingSingle = false;
     playQueueIndex = -1;
     playAllBtn.textContent = "⏸ 読み上げ中...";
     stopBtn.disabled = false;
-    playNextInQueue();
+    playNextInQueue(token);
   }
 
   function playSingle(index) {
@@ -131,15 +194,17 @@
       setStatus("お使いのブラウザは読み上げに対応していません");
       return;
     }
+    playToken += 1;
+    const token = playToken;
     synth.cancel();
     isPlayingAll = false;
     isPlayingSingle = true;
     highlightItem(index);
     stopBtn.disabled = false;
     setStatus(`読み上げ中: 記事 ${index + 1}`);
-    speak(buildUtteranceText(articles[index]), {
+    speak(buildUtteranceParts(articles[index]), token, {
       onend: () => {
-        if (isPlayingSingle) stopAll();
+        if (token === playToken && isPlayingSingle) stopAll();
       },
     });
   }
@@ -350,8 +415,27 @@
     speedValue.textContent = parseFloat(speedRange.value).toFixed(1);
   });
 
+  pitchRange.addEventListener("input", () => {
+    pitchValue.textContent = parseFloat(pitchRange.value).toFixed(1);
+  });
+
+  voiceSelect.addEventListener("change", () => {
+    const voice = japaneseVoices.find((v) => v.name === voiceSelect.value);
+    if (!voice) return;
+    selectedVoice = voice;
+    localStorage.setItem(VOICE_KEY, voice.name);
+  });
+
+  voiceTestBtn.addEventListener("click", () => {
+    playToken += 1;
+    if (speechSupported) synth.cancel();
+    speak(["これはテスト再生です。ニュースはこのような声で読み上げられます。"], playToken);
+  });
+
   if (!speechSupported) {
     playAllBtn.disabled = true;
+    voiceTestBtn.disabled = true;
+    voiceSelect.disabled = true;
     setStatus("お使いのブラウザは読み上げ(Web Speech API)に対応していません");
   }
 
