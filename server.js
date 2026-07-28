@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const path = require("path");
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const Parser = require("rss-parser");
 const { isCrimeArticle } = require("./public/newsFilter.js");
 
@@ -23,7 +24,7 @@ const parser = new Parser({
   headers: { "User-Agent": "Mozilla/5.0 (compatible; NewsReaderBot/1.0)" },
 });
 
-let cache = { fetchedAt: 0, articles: [] };
+let cache = { fetchedAt: 0, articles: [], sourcesOk: 0, sourcesTotal: FEEDS.length };
 
 function stripHtml(html) {
   if (!html) return "";
@@ -37,7 +38,7 @@ function normalizeTitle(title) {
 async function fetchFeed(feed) {
   try {
     const parsed = await parser.parseURL(feed.url);
-    return (parsed.items || []).map((item) => {
+    const items = (parsed.items || []).map((item) => {
       const summary = stripHtml(item.contentSnippet || item.content || item.summary || "");
       return {
         title: (item.title || "").trim(),
@@ -47,15 +48,17 @@ async function fetchFeed(feed) {
         summary,
       };
     });
+    return { ok: true, items };
   } catch (err) {
     console.error(`[news-reader] "${feed.source}" の取得に失敗しました: ${err.message}`);
-    return [];
+    return { ok: false, items: [] };
   }
 }
 
 async function fetchAllNews() {
   const results = await Promise.all(FEEDS.map(fetchFeed));
-  const merged = results.flat();
+  const sourcesOk = results.filter((r) => r.ok).length;
+  const merged = results.flatMap((r) => r.items);
 
   const seenTitles = new Set();
   const deduped = [];
@@ -77,14 +80,14 @@ async function fetchAllNews() {
     return dateB - dateA;
   });
 
-  return filtered.slice(0, MAX_ARTICLES);
+  return { articles: filtered.slice(0, MAX_ARTICLES), sourcesOk, sourcesTotal: FEEDS.length };
 }
 
 async function getNews({ forceRefresh = false } = {}) {
   const isStale = Date.now() - cache.fetchedAt > CACHE_TTL_MS;
   if (forceRefresh || isStale || cache.articles.length === 0) {
-    const articles = await fetchAllNews();
-    cache = { fetchedAt: Date.now(), articles };
+    const { articles, sourcesOk, sourcesTotal } = await fetchAllNews();
+    cache = { fetchedAt: Date.now(), articles, sourcesOk, sourcesTotal };
   }
   return cache;
 }
@@ -185,11 +188,28 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
+// /api/tts は課金対象のGoogle Cloud APIを呼び出すため、
+// 連打・悪用による意図しない課金増加を防ぐレート制限をかけておく
+const ttsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "リクエストが多すぎます。しばらくしてから再試行してください。" },
+});
+app.use("/api/tts", ttsLimiter);
+
 app.get("/api/news", async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === "1";
-    const { fetchedAt, articles } = await getNews({ forceRefresh });
-    res.json({ updatedAt: new Date(fetchedAt).toISOString(), count: articles.length, articles });
+    const { fetchedAt, articles, sourcesOk, sourcesTotal } = await getNews({ forceRefresh });
+    res.json({
+      updatedAt: new Date(fetchedAt).toISOString(),
+      count: articles.length,
+      articles,
+      sourcesOk,
+      sourcesTotal,
+    });
   } catch (err) {
     console.error("[news-reader] /api/news エラー:", err);
     res.status(500).json({ error: "ニュースの取得に失敗しました" });

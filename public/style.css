@@ -7,6 +7,8 @@
   --text-muted: #9aa0b4;
   --accent: #5b8cff;
   --accent-active: #7ea2ff;
+  /* ボタン背景専用。白文字でもWCAG AA(4.5:1以上)のコントラストを満たす濃さ */
+  --accent-contrast: #2f5fd6;
   --radius: 14px;
 }
 
@@ -54,8 +56,12 @@ main {
 }
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: 1 1 auto;
   min-width: 96px;
+  min-height: 44px;
   padding: 14px 12px;
   border-radius: var(--radius);
   border: none;
@@ -77,7 +83,7 @@ main {
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: var(--accent-contrast);
   color: #fff;
 }
 
