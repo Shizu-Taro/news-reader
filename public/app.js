@@ -228,7 +228,13 @@
     return converted.split(SPACE_PLACEHOLDER).join(" ");
   }
 
-  async function speakOneCloud(text, token) {
+  // 音声の取得・再生は、ネットワークの一瞬の不調やブラウザの音声エンジンの
+  // 不具合で失敗することがある。失敗を無視してそのまま次に進むと「勝手に
+  // スキップされた」ように見えてしまうため、一時的な失敗は自動で再試行する。
+  const MAX_SPEECH_RETRIES = 2;
+  const SPEECH_RETRY_DELAY_MS = 500;
+
+  async function speakOneCloudAttempt(text, token) {
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
@@ -240,10 +246,15 @@
           pitch: pitchSemitones(),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // 429(レート制限)や5xx(サーバー側の一時的な問題)は再試行の価値がある。
+        // 400番台(不正なリクエスト等)は再試行しても無駄なので諦める。
+        return { ok: false, retryable: res.status === 429 || res.status >= 500 };
+      }
       const blob = await res.blob();
-      if (token !== playToken) return; // 取得中に停止/次の再生が始まった
+      if (token !== playToken) return { ok: true }; // 取得中に停止/次の再生が始まった
       const objectUrl = URL.createObjectURL(blob);
+      let playbackFailed = false;
       await new Promise((resolve) => {
         const audio = new Audio(objectUrl);
         currentAudio = audio;
@@ -252,44 +263,82 @@
           resolve();
         };
         audio.onended = finish;
-        audio.onerror = finish;
+        audio.onerror = () => {
+          playbackFailed = true;
+          finish();
+        };
         // stopAll() 等から強制停止されたときに、pause() だけでなく
         // このPromiseもきちんと解決させる(でないと待ち続けてBlob URLが
-        // 解放されないまま残ってしまう)
+        // 解放されないまま残ってしまう)。この経路はエラーとして扱わない。
         stopCurrentAudio = () => {
           audio.pause();
           audio.currentTime = 0;
           finish();
         };
-        audio.play().catch(finish);
+        audio.play().catch(() => {
+          playbackFailed = true;
+          finish();
+        });
       });
       URL.revokeObjectURL(objectUrl);
       currentAudio = null;
+      if (token !== playToken) return { ok: true }; // 再生中に停止された
+      return playbackFailed ? { ok: false, retryable: true } : { ok: true };
     } catch (err) {
-      console.error("[news-reader] クラウド音声の再生に失敗しました:", err);
-      currentAudio = null;
+      console.error("[news-reader] クラウド音声の取得に失敗しました:", err);
+      return { ok: false, retryable: true };
     }
   }
 
-  function speakOneDevice(text) {
-    return new Promise((resolve) => {
-      if (!speechSupported) {
-        resolve();
-        return;
+  async function speakOneCloud(text, token) {
+    for (let attempt = 0; attempt <= MAX_SPEECH_RETRIES; attempt++) {
+      if (token !== playToken) return;
+      const result = await speakOneCloudAttempt(text, token);
+      if (result.ok || !result.retryable) return;
+      console.warn(
+        `[news-reader] クラウド音声の再生に失敗したため再試行します (${attempt + 1}/${MAX_SPEECH_RETRIES + 1})`
+      );
+      if (attempt < MAX_SPEECH_RETRIES) {
+        await new Promise((r) => setTimeout(r, SPEECH_RETRY_DELAY_MS));
       }
-      const utterance = new SpeechSynthesisUtterance(spacesToComma(text));
+    }
+  }
+
+  // synth.cancel()由来のエラーは「自前で止めた」だけなので再試行しない
+  const NON_RETRYABLE_SPEECH_ERRORS = new Set(["canceled", "interrupted", "not-allowed"]);
+
+  function speakUtteranceOnce(text) {
+    return new Promise((resolve) => {
+      const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = (selectedVoice && selectedVoice.lang) || "ja-JP";
       if (selectedVoice) utterance.voice = selectedVoice;
       utterance.rate = parseFloat(speedRange.value) || 1;
       utterance.pitch = parseFloat(pitchRange.value) || 1;
-      utterance.onend = () => resolve();
-      utterance.onerror = () => resolve();
+      utterance.onend = () => resolve({ ok: true });
+      utterance.onerror = (event) => resolve({ ok: false, error: event.error });
       synth.speak(utterance);
     });
   }
 
+  async function speakOneDevice(text, token) {
+    if (!speechSupported) return;
+    const spokenText = spacesToComma(text);
+    for (let attempt = 0; attempt <= MAX_SPEECH_RETRIES; attempt++) {
+      if (token !== playToken) return;
+      const result = await speakUtteranceOnce(spokenText);
+      if (result.ok) return;
+      if (NON_RETRYABLE_SPEECH_ERRORS.has(result.error)) return;
+      console.warn(
+        `[news-reader] 読み上げに失敗したため再試行します (${attempt + 1}/${MAX_SPEECH_RETRIES + 1}): ${result.error}`
+      );
+      if (attempt < MAX_SPEECH_RETRIES) {
+        await new Promise((r) => setTimeout(r, SPEECH_RETRY_DELAY_MS));
+      }
+    }
+  }
+
   function speakOne(text, token) {
-    return ttsMode === "cloud" ? speakOneCloud(text, token) : speakOneDevice(text);
+    return ttsMode === "cloud" ? speakOneCloud(text, token) : speakOneDevice(text, token);
   }
 
   const PAUSE_BETWEEN_PARTS_MS = 250;
