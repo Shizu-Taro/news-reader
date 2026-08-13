@@ -9,6 +9,7 @@
   --accent-active: #7ea2ff;
   /* ボタン背景専用。白文字でもWCAG AA(4.5:1以上)のコントラストを満たす濃さ */
   --accent-contrast: #2f5fd6;
+  --warning: #e8a33d;
   --radius: 14px;
 }
 
@@ -173,6 +174,20 @@ main {
   outline: 2px solid var(--accent);
 }
 
+/* 再試行しても音声を鳴らせなかった記事。無言で飛ばされたように見せない */
+.news-item.is-failed {
+  border-left: 3px solid var(--warning);
+}
+
+.news-item.is-failed .news-title::after {
+  content: "音声を再生できませんでした";
+  display: block;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: var(--warning);
+}
+
 .news-item-top {
   display: flex;
   justify-content: space-between;
@@ -226,6 +241,8 @@ main {
     --surface-active: #e6ebff;
     --text: #1b1e29;
     --text-muted: #6b7180;
+    /* 明るい背景でもコントラストが足りるよう濃くする */
+    --warning: #9a5b00;
   }
 
   .btn {

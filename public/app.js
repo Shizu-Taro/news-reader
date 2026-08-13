@@ -204,10 +204,11 @@
 
   function buildUtteranceParts(article) {
     // タイトルと本文を別々の発話に分けることで、一続きで読み上げるより
-    // 自然な「間」ができる
-    const parts = [article.title];
-    if (article.summary) parts.push(article.summary);
-    return parts;
+    // 自然な「間」ができる。空文字や空白だけの本文を発話に混ぜると、
+    // 何も読まずに終わった発話を「失敗」と誤検知してしまうので取り除く。
+    return [article.title, article.summary]
+      .map((part) => (part || "").trim())
+      .filter((part) => part.length > 0);
   }
 
   function pitchSemitones() {
@@ -234,6 +235,37 @@
   const MAX_SPEECH_RETRIES = 2;
   const SPEECH_RETRY_DELAY_MS = 500;
 
+  // クラウド音声は <audio> 要素を記事ごとに作り直さず、1つを使い回す。
+  // 新しく作った要素の play() は「ユーザー操作の直後」でないとスマホの
+  // ブラウザに拒否される。記事の切り替わりは /api/tts の取得待ちを挟むため
+  // 操作直後ではなくなっており、毎回新しい要素を作っているとここで再生を
+  // 拒否され、その記事が丸ごと飛ばされてしまう。一度再生できた要素は
+  // 以降も再生を許可されるので、使い回すことでこれを防ぐ。
+  let sharedAudio = null;
+
+  function getSharedAudio() {
+    if (!sharedAudio) {
+      sharedAudio = new Audio();
+      sharedAudio.preload = "auto";
+    }
+    return sharedAudio;
+  }
+
+  // 44バイトの無音WAV。再生ボタンを押した瞬間にこれを一度鳴らして
+  // <audio> 要素を「解錠」しておく。
+  const SILENT_AUDIO_SRC =
+    "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=";
+  let audioUnlocked = false;
+
+  function unlockAudioPlayback() {
+    if (audioUnlocked || ttsMode !== "cloud") return;
+    audioUnlocked = true;
+    const audio = getSharedAudio();
+    audio.src = SILENT_AUDIO_SRC;
+    const played = audio.play();
+    if (played && typeof played.catch === "function") played.catch(() => {});
+  }
+
   async function speakOneCloudAttempt(text, token) {
     try {
       const res = await fetch("/api/tts", {
@@ -255,10 +287,12 @@
       if (token !== playToken) return { ok: true }; // 取得中に停止/次の再生が始まった
       const objectUrl = URL.createObjectURL(blob);
       let playbackFailed = false;
+      const audio = getSharedAudio();
+      currentAudio = audio;
       await new Promise((resolve) => {
-        const audio = new Audio(objectUrl);
-        currentAudio = audio;
         const finish = () => {
+          audio.onended = null;
+          audio.onerror = null;
           stopCurrentAudio = null;
           resolve();
         };
@@ -272,10 +306,12 @@
         // 解放されないまま残ってしまう)。この経路はエラーとして扱わない。
         stopCurrentAudio = () => {
           audio.pause();
-          audio.currentTime = 0;
           finish();
         };
-        audio.play().catch(() => {
+        audio.src = objectUrl;
+        audio.load();
+        audio.play().catch((err) => {
+          console.warn("[news-reader] 音声の再生が拒否されました:", err);
           playbackFailed = true;
           finish();
         });
@@ -290,11 +326,14 @@
     }
   }
 
+  // 読み上げられたら true、再試行し尽くしても鳴らせなければ false を返す。
+  // 自分で停止した場合は「失敗」ではないので true 扱いにする。
   async function speakOneCloud(text, token) {
     for (let attempt = 0; attempt <= MAX_SPEECH_RETRIES; attempt++) {
-      if (token !== playToken) return;
+      if (token !== playToken) return true;
       const result = await speakOneCloudAttempt(text, token);
-      if (result.ok || !result.retryable) return;
+      if (result.ok) return true;
+      if (!result.retryable) return false;
       console.warn(
         `[news-reader] クラウド音声の再生に失敗したため再試行します (${attempt + 1}/${MAX_SPEECH_RETRIES + 1})`
       );
@@ -302,32 +341,101 @@
         await new Promise((r) => setTimeout(r, SPEECH_RETRY_DELAY_MS));
       }
     }
+    return false;
   }
 
-  // synth.cancel()由来のエラーは「自前で止めた」だけなので再試行しない
+  // 自分で止めた(stopAll/次の再生の開始)ときのエラー。失敗ではない。
+  const USER_STOP_SPEECH_ERRORS = new Set(["canceled", "interrupted"]);
+  // 再試行しても結果が変わらないエラー。
   const NON_RETRYABLE_SPEECH_ERRORS = new Set(["canceled", "interrupted", "not-allowed"]);
+
+  // 音声エンジンが発話をそのまま捨ててしまうことがある。このとき音は出ないのに
+  // onend だけがほぼ即座に返ってくるため、成功として扱うと記事が丸ごと無音のまま
+  // 次へ進んでしまう。読み上げが実際に始まれば必ず start が発火するので、
+  // 「start が来ないまま一瞬で end だけ返ってきた」場合を捨てられたとみなす。
+  // 単に速く読み終えただけの短い文を誤検知しないよう、start の有無・所要時間・
+  // 文字数の3つが揃ったときだけ再試行する。
+  const DROPPED_UTTERANCE_MS = 250;
+  const DROP_CHECK_MIN_TEXT_LENGTH = 8;
+  // onend も onerror も返ってこないまま止まってしまう端末があるので、
+  // 想定所要時間を大きく超えたら打ち切って再試行する。
+  // 日本語の読み上げをおおよそ毎秒7文字として見積もる。
+  const SPEECH_CHARS_PER_SECOND = 7;
+  const SPEECH_WATCHDOG_MARGIN_MS = 8000;
+  // 無応答はエンジン側が止まっている可能性が高く、何度粘っても待ち時間が
+  // 伸びるだけで固まったように見える。無応答での再試行は1回までにする。
+  const MAX_SPEECH_TIMEOUT_RETRIES = 1;
+
+  // 発話中のutteranceがガベージコレクションされると、読み上げが途中で
+  // 打ち切られたりonendが返らなくなったりする。参照を保持して防ぐ。
+  let activeUtterance = null;
+
+  function estimateSpeechMs(text, rate) {
+    return ((text.length / SPEECH_CHARS_PER_SECOND) * 1000) / (rate || 1);
+  }
 
   function speakUtteranceOnce(text) {
     return new Promise((resolve) => {
+      const rate = parseFloat(speedRange.value) || 1;
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = (selectedVoice && selectedVoice.lang) || "ja-JP";
       if (selectedVoice) utterance.voice = selectedVoice;
-      utterance.rate = parseFloat(speedRange.value) || 1;
+      utterance.rate = rate;
       utterance.pitch = parseFloat(pitchRange.value) || 1;
-      utterance.onend = () => resolve({ ok: true });
-      utterance.onerror = (event) => resolve({ ok: false, error: event.error });
+      activeUtterance = utterance;
+
+      const queuedAt = Date.now();
+      let settled = false;
+      let timedOut = false;
+      let started = false;
+
+      const settle = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
+        activeUtterance = null;
+        resolve(result);
+      };
+
+      const watchdog = setTimeout(() => {
+        timedOut = true;
+        synth.cancel(); // 詰まった発話を捨てないと次の発話も始まらない
+        settle({ ok: false, error: "timeout" });
+      }, estimateSpeechMs(text, rate) + SPEECH_WATCHDOG_MARGIN_MS);
+
+      utterance.onstart = () => {
+        started = true;
+      };
+      utterance.onend = () => {
+        const elapsed = Date.now() - queuedAt;
+        const looksDropped =
+          !started && text.length >= DROP_CHECK_MIN_TEXT_LENGTH && elapsed < DROPPED_UTTERANCE_MS;
+        settle(looksDropped ? { ok: false, error: "dropped" } : { ok: true });
+      };
+      // watchdogのcancel()が誘発するcanceledで「自分で止めた」と誤判定しないよう、
+      // タイムアウト経路のエラーはtimeoutとして扱う。
+      utterance.onerror = (event) =>
+        settle({ ok: false, error: timedOut ? "timeout" : event.error });
+
       synth.speak(utterance);
+      // cancel()の直後などに一時停止状態のまま残る端末があり、そのままだと
+      // 発話が始まらずタイムアウトするだけになる。念のため再開させる。
+      if (synth.paused) synth.resume();
     });
   }
 
+  // 読み上げられたら true、再試行し尽くしても鳴らせなければ false を返す。
   async function speakOneDevice(text, token) {
-    if (!speechSupported) return;
+    if (!speechSupported) return false;
     const spokenText = spacesToComma(text);
+    let timeouts = 0;
     for (let attempt = 0; attempt <= MAX_SPEECH_RETRIES; attempt++) {
-      if (token !== playToken) return;
+      if (token !== playToken) return true;
       const result = await speakUtteranceOnce(spokenText);
-      if (result.ok) return;
-      if (NON_RETRYABLE_SPEECH_ERRORS.has(result.error)) return;
+      if (result.ok) return true;
+      if (USER_STOP_SPEECH_ERRORS.has(result.error)) return true;
+      if (NON_RETRYABLE_SPEECH_ERRORS.has(result.error)) return false;
+      if (result.error === "timeout" && ++timeouts > MAX_SPEECH_TIMEOUT_RETRIES) return false;
       console.warn(
         `[news-reader] 読み上げに失敗したため再試行します (${attempt + 1}/${MAX_SPEECH_RETRIES + 1}): ${result.error}`
       );
@@ -335,6 +443,7 @@
         await new Promise((r) => setTimeout(r, SPEECH_RETRY_DELAY_MS));
       }
     }
+    return false;
   }
 
   function speakOne(text, token) {
@@ -342,6 +451,10 @@
   }
 
   const PAUSE_BETWEEN_PARTS_MS = 250;
+  // 記事の切り替わりでも必ず「間」を空ける。聞きやすさのためだけでなく、
+  // 前の発話の終了イベントから抜けた新しいタスクで次を始めるために必要
+  // (詳細は scheduleNextArticle のコメント)。
+  const PAUSE_BETWEEN_ARTICLES_MS = 600;
   let playToken = 0;
 
   function ttsAvailable() {
@@ -349,17 +462,19 @@
     return speechSupported && japaneseVoices.length > 0;
   }
 
+  // onend には「すべてのパートを実際に読み上げられたか」を渡す。
   async function speak(parts, token, { onend } = {}) {
     if (!ttsAvailable()) return;
+    let spokenAll = true;
     for (let i = 0; i < parts.length; i++) {
-      await speakOne(parts[i], token);
+      if (!(await speakOne(parts[i], token))) spokenAll = false;
       if (token !== playToken) return; // 途中で停止/次の再生が開始された
       if (i < parts.length - 1) {
         await new Promise((r) => setTimeout(r, PAUSE_BETWEEN_PARTS_MS));
         if (token !== playToken) return;
       }
     }
-    onend && onend();
+    onend && onend(spokenAll);
   }
 
   function highlightItem(index) {
@@ -370,6 +485,22 @@
       const el = newsList.children[index];
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
     }
+  }
+
+  // 再試行しても鳴らせなかった記事は、無言で次に進むと「勝手に飛ばされた」
+  // としか見えない。一覧側に印を付けて、後から気づけるようにする。
+  const failedArticleIndexes = new Set();
+
+  function markArticleFailed(index) {
+    failedArticleIndexes.add(index);
+    const el = newsList.children[index];
+    if (el) el.classList.add("is-failed");
+    console.warn(`[news-reader] 記事 ${index + 1} の読み上げに失敗しました`);
+  }
+
+  function clearFailureMarks() {
+    failedArticleIndexes.clear();
+    newsList.querySelectorAll(".is-failed").forEach((el) => el.classList.remove("is-failed"));
   }
 
   // スマホは手を触れていないとすぐ画面が消灯し、その際にブラウザの処理
@@ -428,18 +559,38 @@
     setStatus(`${articles.length}件のニュースがあります`);
   }
 
+  // 次の記事は、前の記事の終了イベントから抜けた「新しいタスク」で始める。
+  // onend / ended ハンドラの中から続けて synth.speak() や audio.play() を呼ぶと、
+  // 音声エンジンによっては次の発話がそのまま捨てられ、音が鳴らないのに終了だけが
+  // 返ってくる。これが「記事の切り替わりで読み上げが飛ばされる」直接の原因になる。
+  function scheduleNextArticle(token) {
+    setTimeout(() => playNextInQueue(token), PAUSE_BETWEEN_ARTICLES_MS);
+  }
+
   function playNextInQueue(token) {
     if (token !== playToken) return;
     playQueueIndex += 1;
     if (playQueueIndex >= articles.length) {
-      stopAll();
+      finishPlayAll();
       return;
     }
-    highlightItem(playQueueIndex);
-    setStatus(`読み上げ中: ${playQueueIndex + 1} / ${articles.length}`);
-    speak(buildUtteranceParts(articles[playQueueIndex]), token, {
-      onend: () => playNextInQueue(token),
+    const index = playQueueIndex;
+    highlightItem(index);
+    setStatus(`読み上げ中: ${index + 1} / ${articles.length}`);
+    speak(buildUtteranceParts(articles[index]), token, {
+      onend: (spokenAll) => {
+        if (!spokenAll) markArticleFailed(index);
+        scheduleNextArticle(token);
+      },
     });
+  }
+
+  function finishPlayAll() {
+    const failedCount = failedArticleIndexes.size;
+    stopAll();
+    if (failedCount > 0) {
+      setStatus(`読み上げが終わりました(${failedCount}件は音声を再生できませんでした)`);
+    }
   }
 
   function startPlayAll() {
@@ -451,6 +602,8 @@
     playToken += 1;
     const token = playToken;
     interruptPlayback();
+    unlockAudioPlayback(); // ボタンを押したこの場で <audio> 要素を解錠しておく
+    clearFailureMarks();
     acquireWakeLock();
     isPlayingAll = true;
     isPlayingSingle = false;
@@ -468,6 +621,7 @@
     playToken += 1;
     const token = playToken;
     interruptPlayback();
+    unlockAudioPlayback(); // ボタンを押したこの場で <audio> 要素を解錠しておく
     acquireWakeLock();
     isPlayingAll = false;
     isPlayingSingle = true;
@@ -475,8 +629,11 @@
     stopBtn.disabled = false;
     setStatus(`読み上げ中: 記事 ${index + 1}`);
     speak(buildUtteranceParts(articles[index]), token, {
-      onend: () => {
-        if (token === playToken && isPlayingSingle) stopAll();
+      onend: (spokenAll) => {
+        if (!spokenAll) markArticleFailed(index);
+        if (token !== playToken || !isPlayingSingle) return;
+        stopAll();
+        if (!spokenAll) setStatus("この記事の音声を再生できませんでした。もう一度お試しください。");
       },
     });
   }
@@ -712,6 +869,7 @@
   voiceTestBtn.addEventListener("click", () => {
     playToken += 1;
     interruptPlayback();
+    unlockAudioPlayback();
     speak(["これはテスト再生です。ニュースはこのような声で読み上げられます。"], playToken);
   });
 
