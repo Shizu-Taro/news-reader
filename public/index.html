@@ -23,9 +23,23 @@
       <button id="refresh-btn" class="btn" type="button">⟳ 更新</button>
     </section>
 
+    <section class="voice-control">
+      <label for="voice-select">読み上げ音声</label>
+      <div class="voice-row">
+        <select id="voice-select"></select>
+        <button id="voice-test-btn" class="btn" type="button">試聴</button>
+      </div>
+      <p id="voice-mode-hint" class="voice-mode-hint"></p>
+    </section>
+
     <section class="speed-control">
       <label for="speed-range">読み上げ速度: <span id="speed-value">1.0</span>倍</label>
       <input id="speed-range" type="range" min="0.5" max="2" step="0.1" value="1" />
+    </section>
+
+    <section class="speed-control">
+      <label for="pitch-range">声の高さ: <span id="pitch-value">1.0</span></label>
+      <input id="pitch-range" type="range" min="0.5" max="1.5" step="0.1" value="1" />
     </section>
 
     <p id="status-line" class="status-line" aria-live="polite">読み込み中...</p>
