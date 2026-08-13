@@ -372,6 +372,39 @@
     }
   }
 
+  // スマホは手を触れていないとすぐ画面が消灯し、その際にブラウザの処理
+  // (読み上げ・タイマー・通信)が止められて「勝手にスキップされた」ように
+  // 見えることがある。再生中は画面消灯を防ぐことでこれを軽減する。
+  // 対応していないブラウザ(古いiOS Safari等)では何もしない。
+  let wakeLock = null;
+
+  async function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => {
+        wakeLock = null;
+      });
+    } catch (err) {
+      console.warn("[news-reader] Wake Lockを取得できませんでした:", err);
+    }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) {
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+  }
+
+  // タブを一瞬離れる等でWake Lockが自動解除された場合、再生中であれば
+  // 画面に戻ってきたタイミングで取り直す
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && (isPlayingAll || isPlayingSingle) && !wakeLock) {
+      acquireWakeLock();
+    }
+  });
+
   // 再生中の音声(端末合成/クラウド音声どちらも)を即座に止める。
   // synth.cancel() だけでなく stopCurrentAudio() も必ず呼ぶことで、
   // speakOneCloud内で待機しているPromiseを解決させ、ハングやBlob URL
@@ -385,6 +418,7 @@
   function stopAll() {
     playToken += 1; // 実行中の発話チェーンを無効化する
     interruptPlayback();
+    releaseWakeLock();
     isPlayingAll = false;
     isPlayingSingle = false;
     playQueueIndex = -1;
@@ -417,6 +451,7 @@
     playToken += 1;
     const token = playToken;
     interruptPlayback();
+    acquireWakeLock();
     isPlayingAll = true;
     isPlayingSingle = false;
     playQueueIndex = -1;
@@ -433,6 +468,7 @@
     playToken += 1;
     const token = playToken;
     interruptPlayback();
+    acquireWakeLock();
     isPlayingAll = false;
     isPlayingSingle = true;
     highlightItem(index);
