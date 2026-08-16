@@ -5,6 +5,7 @@ const express = require("express");
 const rateLimit = require("express-rate-limit");
 const Parser = require("rss-parser");
 const { isCrimeArticle } = require("./public/newsFilter.js");
+const { extractImageUrl } = require("./public/articleImage.js");
 
 const PORT = process.env.PORT || 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5分キャッシュ
@@ -22,6 +23,16 @@ const FEEDS = [
 const parser = new Parser({
   timeout: 10000,
   headers: { "User-Agent": "Mozilla/5.0 (compatible; NewsReaderBot/1.0)" },
+  // rss-parser は既定でこれらの要素を捨ててしまうため、記事のサムネイルを
+  // 取り出せるよう明示的に拾う。フィードごとに使われている要素が違うので
+  // 候補をまとめて登録しておく({ keepArray: true } で複数個あっても全部残す)。
+  customFields: {
+    item: [
+      ["media:thumbnail", "mediaThumbnail", { keepArray: true }],
+      ["media:content", "mediaContent", { keepArray: true }],
+      ["content:encoded", "contentEncoded"],
+    ],
+  },
 });
 
 let cache = { fetchedAt: 0, articles: [], sourcesOk: 0, sourcesTotal: FEEDS.length };
@@ -46,6 +57,7 @@ async function fetchFeed(feed) {
         source: feed.source,
         pubDate: item.pubDate || item.isoDate || null,
         summary,
+        imageUrl: extractImageUrl(item),
       };
     });
     return { ok: true, items };

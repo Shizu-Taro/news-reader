@@ -638,6 +638,25 @@
     });
   }
 
+  function buildThumbnail(article) {
+    const url = window.ArticleImage.sanitizeImageUrl(article.imageUrl);
+    if (!url) return null;
+    const img = document.createElement("img");
+    img.className = "news-thumb";
+    img.src = url;
+    img.alt = ""; // 見出しが隣にあるので、読み上げ環境では飾り扱いにする
+    img.loading = "lazy";
+    img.decoding = "async";
+    // 直リンクをリファラで弾く配信元があるため、リファラを送らない
+    img.referrerPolicy = "no-referrer";
+    img.addEventListener("error", () => {
+      const item = img.closest(".news-item");
+      if (item) item.classList.remove("has-thumb");
+      img.remove();
+    });
+    return img;
+  }
+
   function renderArticles() {
     newsList.innerHTML = "";
     articles.forEach((article, index) => {
@@ -647,6 +666,10 @@
       const top = document.createElement("div");
       top.className = "news-item-top";
       top.innerHTML = `<span>${article.source}</span><span>${formatDate(article.pubDate)}</span>`;
+
+      // サムネイルは記事の識別を助けるだけの飾りなので、読み込めなければ
+      // 枠ごと消す(空枠が残る方が見た目に悪い)。読み上げ内容には影響しない。
+      const thumb = buildThumbnail(article);
 
       const title = document.createElement("h2");
       title.className = "news-title";
@@ -674,6 +697,10 @@
 
       actions.append(playBtn, link);
       li.append(top, title, summary, actions);
+      if (thumb) {
+        li.classList.add("has-thumb");
+        li.append(thumb);
+      }
       newsList.appendChild(li);
     });
   }
@@ -728,6 +755,7 @@
       source: sourceName,
       pubDate: item.querySelector("pubDate")?.textContent?.trim() || null,
       summary: stripHtml(item.querySelector("description")?.textContent || ""),
+      imageUrl: window.ArticleImage.extractImageUrlFromXml(item),
     }));
   }
 

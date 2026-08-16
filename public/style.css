@@ -206,6 +206,47 @@ main {
   color: var(--warning);
 }
 
+/* サムネイルがある記事だけグリッドに切り替える。読み上げアプリなので画像は
+   主役ではなく、一覧が縦に伸びてスクロール量が増えないよう小さめに抑える。
+   HTMLの構造は変えずに、配置だけグリッドで組み替えている */
+.news-item.has-thumb {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-areas:
+    "thumb top"
+    "thumb title"
+    "thumb summary"
+    "actions actions";
+  column-gap: 12px;
+}
+
+.news-item.has-thumb .news-item-top {
+  grid-area: top;
+}
+
+.news-item.has-thumb .news-title {
+  grid-area: title;
+}
+
+.news-item.has-thumb .news-summary {
+  grid-area: summary;
+}
+
+.news-item.has-thumb .news-item-actions {
+  grid-area: actions;
+}
+
+.news-thumb {
+  grid-area: thumb;
+  align-self: start;
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 10px;
+  /* 読み込み中に枠が透けないよう下地を敷く */
+  background: var(--surface-active);
+}
+
 .news-item-top {
   display: flex;
   justify-content: space-between;
