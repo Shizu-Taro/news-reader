@@ -477,14 +477,14 @@
     onend && onend(spokenAll);
   }
 
+  // 読み上げ中の記事は色を変えるだけにして、画面は動かさない。
+  // 勝手にスクロールすると、別の記事を読んでいる最中に位置を見失ううえ、
+  // 操作ボタンから離れてしまう(ボタン側は .controls を画面上部に固定して
+  // いつでも押せるようにしてある)。
   function highlightItem(index) {
     document.querySelectorAll(".news-item").forEach((el, i) => {
       el.classList.toggle("is-playing", i === index);
     });
-    if (index >= 0) {
-      const el = newsList.children[index];
-      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
   }
 
   // 再試行しても鳴らせなかった記事は、無言で次に進むと「勝手に飛ばされた」

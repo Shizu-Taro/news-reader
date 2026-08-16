@@ -10,6 +10,7 @@
   /* ボタン背景専用。白文字でもWCAG AA(4.5:1以上)のコントラストを満たす濃さ */
   --accent-contrast: #2f5fd6;
   --warning: #e8a33d;
+  --divider: rgba(255, 255, 255, 0.1);
   --radius: 14px;
 }
 
@@ -53,7 +54,24 @@ main {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: center;
-  margin: 12px 0;
+  /* 一覧をスクロールしても停止ボタンにいつでも手が届くよう画面上部に固定する。
+     左右の負マージンで main の内側余白まで背景を広げ、記事が透けないようにする */
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: 12px -12px;
+  padding: 8px 12px;
+  background: var(--bg);
+  /* 記事がバーの下に潜り込むので、境目が分かるよう罫線を1本引く */
+  border-bottom: 1px solid var(--divider);
+}
+
+/* 画面上部に居座り続けるので、3つのボタンが1段に収まるよう控えめにする。
+   min-height: 44px はそのままなのでタップ領域は狭くならない */
+.controls .btn {
+  min-width: 72px;
+  padding: 10px 8px;
+  font-size: 0.9rem;
 }
 
 .btn {
@@ -243,6 +261,7 @@ main {
     --text-muted: #6b7180;
     /* 明るい背景でもコントラストが足りるよう濃くする */
     --warning: #9a5b00;
+    --divider: rgba(0, 0, 0, 0.12);
   }
 
   .btn {
