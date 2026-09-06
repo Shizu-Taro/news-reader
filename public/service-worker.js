@@ -5,7 +5,6 @@ const SHELL_FILES = [
   "/style.css",
   "/app.js",
   "/newsFilter.js",
-  "/articleImage.js",
   "/manifest.json",
   "/icons/icon.svg",
 ];
