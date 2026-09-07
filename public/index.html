@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#1b1f2b" />
+  <meta name="theme-color" content="#1b1f2b" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f4f5fa" media="(prefers-color-scheme: light)" />
   <title>ニュース読み上げ</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
@@ -18,29 +19,41 @@
 
   <main>
     <section class="controls">
-      <button id="play-all-btn" class="btn btn-primary" type="button">▶ すべて読み上げる</button>
-      <button id="stop-btn" class="btn" type="button" disabled>■ 停止</button>
-      <button id="refresh-btn" class="btn" type="button">⟳ 更新</button>
-    </section>
-
-    <section class="voice-control">
-      <label for="voice-select">読み上げ音声</label>
-      <div class="voice-row">
-        <select id="voice-select"></select>
-        <button id="voice-test-btn" class="btn" type="button">試聴</button>
+      <div class="controls-row">
+        <button id="play-all-btn" class="btn btn-primary" type="button" aria-pressed="false">▶ すべて読み上げる</button>
+        <button id="next-btn" class="btn" type="button" disabled>⏭ 次へ</button>
+        <button id="refresh-btn" class="btn" type="button">⟳ 更新</button>
       </div>
-      <p id="voice-mode-hint" class="voice-mode-hint"></p>
+      <button id="now-playing" class="now-playing" type="button" hidden>
+        <span id="np-count" class="np-count"></span>
+        <span id="np-title" class="np-title"></span>
+        <span class="np-hint">現在地へ</span>
+      </button>
     </section>
 
-    <section class="speed-control">
-      <label for="speed-range">読み上げ速度: <span id="speed-value">1.0</span>倍</label>
-      <input id="speed-range" type="range" min="0.5" max="2" step="0.1" value="1" />
-    </section>
+    <details id="settings" class="settings">
+      <summary>音声と速度の設定</summary>
+      <div class="settings-body">
+        <div class="voice-control">
+          <label for="voice-select">読み上げ音声</label>
+          <div class="voice-row">
+            <select id="voice-select"></select>
+            <button id="voice-test-btn" class="btn" type="button">試聴</button>
+          </div>
+          <p id="voice-mode-hint" class="voice-mode-hint"></p>
+        </div>
 
-    <section class="speed-control">
-      <label for="pitch-range">声の高さ: <span id="pitch-value">1.0</span></label>
-      <input id="pitch-range" type="range" min="0.5" max="1.5" step="0.1" value="1" />
-    </section>
+        <div class="speed-control">
+          <label for="speed-range">読み上げ速度: <span id="speed-value">1.0</span>倍</label>
+          <input id="speed-range" type="range" min="0.5" max="2" step="0.1" value="1" />
+        </div>
+
+        <div class="speed-control">
+          <label for="pitch-range">声の高さ: <span id="pitch-value">1.0</span></label>
+          <input id="pitch-range" type="range" min="0.5" max="1.5" step="0.1" value="1" />
+        </div>
+      </div>
+    </details>
 
     <p id="status-line" class="status-line" aria-live="polite">読み込み中...</p>
 

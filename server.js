@@ -8,6 +8,7 @@ const { isCrimeArticle } = require("./public/newsFilter.js");
 
 const PORT = process.env.PORT || 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5分キャッシュ
+const FAILED_CACHE_TTL_MS = 30 * 1000; // 取得に失敗しているときの再挑戦間隔
 const MAX_ARTICLES = 40;
 const GOOGLE_TTS_API_KEY = process.env.GOOGLE_TTS_API_KEY || "";
 const TTS_CACHE_MAX_ENTRIES = 200;
@@ -35,6 +36,19 @@ function normalizeTitle(title) {
   return (title || "").trim().toLowerCase();
 }
 
+// 記事リンクは外部のRSS由来なので、http/https 以外は受け付けない。
+// javascript: などをそのまま href に流すと、フィード提供元(やブラウザ単体
+// モードで挟まる公開CORSプロキシ)からXSSを撃ち込まれる余地ができる。
+function sanitizeLink(url) {
+  if (typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url.trim());
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
 async function fetchFeed(feed) {
   try {
     const parsed = await parser.parseURL(feed.url);
@@ -42,7 +56,7 @@ async function fetchFeed(feed) {
       const summary = stripHtml(item.contentSnippet || item.content || item.summary || "");
       return {
         title: (item.title || "").trim(),
-        link: item.link || "",
+        link: sanitizeLink(item.link),
         source: feed.source,
         pubDate: item.pubDate || item.isoDate || null,
         summary,
@@ -83,11 +97,29 @@ async function fetchAllNews() {
   return { articles: filtered.slice(0, MAX_ARTICLES), sourcesOk, sourcesTotal: FEEDS.length };
 }
 
+// 同じ瞬間に複数のリクエストが来ても、外部への取得は1回にまとめる
+let inflightFetch = null;
+
 async function getNews({ forceRefresh = false } = {}) {
-  const isStale = Date.now() - cache.fetchedAt > CACHE_TTL_MS;
-  if (forceRefresh || isStale || cache.articles.length === 0) {
-    const { articles, sourcesOk, sourcesTotal } = await fetchAllNews();
-    cache = { fetchedAt: Date.now(), articles, sourcesOk, sourcesTotal };
+  // 取得に失敗している間は短い間隔で再挑戦する。以前は「記事0件なら毎回再取得」
+  // だったため、上流が全滅するとキャッシュが一切効かず、リクエストのたびに
+  // RSSを3本叩き直してプロセスが詰まっていた。
+  const ttl = cache.sourcesOk > 0 ? CACHE_TTL_MS : FAILED_CACHE_TTL_MS;
+  if (!forceRefresh && Date.now() - cache.fetchedAt < ttl) return cache;
+
+  if (!inflightFetch) {
+    inflightFetch = fetchAllNews().finally(() => {
+      inflightFetch = null;
+    });
+  }
+  const fresh = await inflightFetch;
+
+  if (fresh.articles.length > 0 || cache.articles.length === 0) {
+    cache = { fetchedAt: Date.now(), ...fresh };
+  } else {
+    // 取得に失敗したときは、直前まで持っていた正常な記事を捨てない。
+    // 失敗したこと自体は覚えて、短いTTLで再挑戦させる。
+    cache = { ...cache, fetchedAt: Date.now(), sourcesOk: fresh.sourcesOk };
   }
   return cache;
 }
@@ -133,6 +165,24 @@ async function fetchAvailableVoices() {
   return voices;
 }
 
+// レート制限はIPごとの歯止めでしかなく、IPを変えられれば青天井になる。
+// 公開URLで課金が発生する以上、1日あたりの合成文字数にも絶対的な上限を置く。
+// キャッシュに当たったリクエストは実費が出ないので加算しない。
+const DAILY_TTS_CHAR_BUDGET = Number(process.env.DAILY_TTS_CHAR_BUDGET) || 300000;
+let ttsCharsToday = 0;
+let ttsBudgetDay = "";
+
+function reserveTtsBudget(charCount) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== ttsBudgetDay) {
+    ttsBudgetDay = today;
+    ttsCharsToday = 0;
+  }
+  if (ttsCharsToday + charCount > DAILY_TTS_CHAR_BUDGET) return false;
+  ttsCharsToday += charCount;
+  return true;
+}
+
 const ttsCache = new Map();
 
 function clamp(value, min, max, fallback) {
@@ -152,8 +202,12 @@ function spacesToComma(text) {
   return converted.split(SPACE_PLACEHOLDER).join(" ");
 }
 
+function speechCacheKey({ text, voiceName, speakingRate, pitch }) {
+  return JSON.stringify({ text, voiceName, speakingRate, pitch });
+}
+
 async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
-  const cacheKey = JSON.stringify({ text, voiceName, speakingRate, pitch });
+  const cacheKey = speechCacheKey({ text, voiceName, speakingRate, pitch });
   const cached = ttsCache.get(cacheKey);
   if (cached) return cached;
 
@@ -185,6 +239,10 @@ async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
 }
 
 const app = express();
+// Renderのようなリバースプロキシ配下では req.ip がロードバランサのIPに固定される。
+// これを信頼しないと、下のレート制限が「IPごと」ではなく「全ユーザー合計で1バケツ」
+// として効いてしまい、正常な利用者同士が枠を奪い合うことになる。
+app.set("trust proxy", 1);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -260,8 +318,16 @@ app.post("/api/tts", async (req, res) => {
   const speakingRate = clamp(req.body?.speakingRate, 0.5, 2.0, 1.0);
   const pitch = clamp(req.body?.pitch, -10, 10, 0);
 
+  // 同じ音声のキャッシュに当たるなら実費は出ないので、予算は消費させない
+  const params = { text, voiceName, speakingRate, pitch };
+  if (!ttsCache.has(speechCacheKey(params)) && !reserveTtsBudget(text.length)) {
+    console.warn("[news-reader] 本日の音声合成の上限に達したため /api/tts を拒否しました");
+    res.status(503).json({ error: "本日の音声合成の上限に達しました。時間をおいてお試しください。" });
+    return;
+  }
+
   try {
-    const audioBuffer = await synthesizeSpeech({ text, voiceName, speakingRate, pitch });
+    const audioBuffer = await synthesizeSpeech(params);
     res.set("Content-Type", "audio/mpeg");
     res.send(audioBuffer);
   } catch (err) {

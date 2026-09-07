@@ -6,7 +6,6 @@
   --text: #eef0f8;
   --text-muted: #9aa0b4;
   --accent: #5b8cff;
-  --accent-active: #7ea2ff;
   /* ボタン背景専用。白文字でもWCAG AA(4.5:1以上)のコントラストを満たす濃さ */
   --accent-contrast: #2f5fd6;
   --warning: #e8a33d;
@@ -28,7 +27,7 @@ body {
 }
 
 .app-header {
-  padding: 20px 16px 8px;
+  padding: calc(20px + env(safe-area-inset-top, 0px)) 16px 8px;
   text-align: center;
 }
 
@@ -51,27 +50,128 @@ main {
 
 .controls {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
   /* 一覧をスクロールしても停止ボタンにいつでも手が届くよう画面上部に固定する。
      左右の負マージンで main の内側余白まで背景を広げ、記事が透けないようにする */
   position: sticky;
   top: 0;
   z-index: 10;
   margin: 12px -12px;
-  padding: 8px 12px;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;
   background: var(--bg);
   /* 記事がバーの下に潜り込むので、境目が分かるよう罫線を1本引く */
   border-bottom: 1px solid var(--divider);
 }
 
-/* 画面上部に居座り続けるので、3つのボタンが1段に収まるよう控えめにする。
+/* 狭い画面でも折り返さず1段に収める。折り返すと「更新」が単独で全幅の
+   最大ボタンになり、スクロール中の誤タップで再生が飛ぶ。
    min-height: 44px はそのままなのでタップ領域は狭くならない */
+.controls-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
 .controls .btn {
-  min-width: 72px;
-  padding: 10px 8px;
+  min-width: 0;
+  flex: 1 1 0;
+  padding: 10px 4px;
   font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.controls .btn-primary {
+  flex: 1.9 1 0;
+}
+
+/* 読み上げ中の記事を固定バーの中に出す。自動スクロールはしない代わりに、
+   ここを押せば現在地へ戻れる。
+   display 指定は hidden 属性より強いので、非表示のときを明示しておく
+   (これが無いと再生していない間もバーの高さを取ってしまう) */
+.now-playing[hidden] {
+  display: none;
+}
+
+.now-playing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 4px 2px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.np-count {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.np-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.np-hint {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  border: 1px solid var(--divider);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+/* 固定バーの下に潜り込ませずにスクロールする */
+.news-item {
+  scroll-margin-top: 108px;
+}
+
+/* 設定は畳んでおく。常時展開だと狭い画面で記事が1件も見えなかった */
+.settings {
+  margin: 4px 0 16px;
+  border-bottom: 1px solid var(--divider);
+}
+
+.settings > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 2px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 8px;
+  transition: transform 0.15s ease;
+}
+
+.settings[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.settings-body {
+  padding-bottom: 8px;
 }
 
 .btn {
@@ -106,8 +206,19 @@ main {
   color: #fff;
 }
 
-.btn-primary:not(:disabled):hover {
-  background: var(--accent-active);
+/* タッチ端末では :hover がタップ後に貼り付いたまま解除されず、固定バーの
+   主ボタンが薄い色のまま残ってコントラストが2.47:1まで落ちていた。
+   hover演出はポインタ端末に限定し、押した感触は :active で出す。 */
+@media (hover: hover) and (pointer: fine) {
+  .btn-primary:not(:disabled):hover {
+    /* 塗りボタンなので明るくするとコントラストが落ちる。濃くする方向で反応させる
+       (白文字に対して #2f5fd6 は5.6:1、#2851bd は7.0:1) */
+    background: #2851bd;
+  }
+}
+
+.btn-primary:not(:disabled):active {
+  background: #24499f;
 }
 
 .speed-control {
@@ -123,6 +234,7 @@ main {
 
 .speed-control input[type="range"] {
   width: 100%;
+  height: 44px; /* 歩きながらでもつまめるようタップ領域を確保する */
 }
 
 .voice-control {
@@ -258,7 +370,9 @@ main {
     --surface: #ffffff;
     --surface-active: #e6ebff;
     --text: #1b1e29;
-    --text-muted: #6b7180;
+    /* 屋外で読めるよう、明モードだけ濃くする(旧値は4.49:1でAAをわずかに割っていた) */
+    --text-muted: #565d6d;
+    --accent: #1f4fc4;
     /* 明るい背景でもコントラストが足りるよう濃くする */
     --warning: #9a5b00;
     --divider: rgba(0, 0, 0, 0.12);

@@ -1,6 +1,10 @@
 (() => {
   const playAllBtn = document.getElementById("play-all-btn");
-  const stopBtn = document.getElementById("stop-btn");
+  const nextBtn = document.getElementById("next-btn");
+  const nowPlayingBtn = document.getElementById("now-playing");
+  const npCount = document.getElementById("np-count");
+  const npTitle = document.getElementById("np-title");
+  const settingsEl = document.getElementById("settings");
   const refreshBtn = document.getElementById("refresh-btn");
   const speedRange = document.getElementById("speed-range");
   const speedValue = document.getElementById("speed-value");
@@ -40,11 +44,15 @@
   let cloudVoices = []; // server.js の /api/tts/voices から取得した実際の日本語ボイス一覧
   let selectedCloudVoiceName = null;
   let ttsMode = "device"; // "cloud" | "device"
-  let currentAudio = null;
   let stopCurrentAudio = null; // 再生中のクラウド音声を強制停止するための関数
+  // 再生状態は1つの変数で持つ。以前は isPlayingAll / isPlayingSingle /
+  // ボタンの文言 の3つに散っていて、個別再生中にボタンだけ「読み上げ中」の
+  // まま残る、試聴すると状態が戻らない、といった食い違いが起きていた。
+  let playbackState = "idle"; // "idle" | "all" | "single"
   let playQueueIndex = -1;
-  let isPlayingAll = false;
-  let isPlayingSingle = false;
+  // 停止しても読んだところを覚えておき、次はその続きから再開する。
+  // 以前は毎回1件目に巻き戻っていて、電話などで中断するたびに聞き直しだった。
+  let resumeFrom = 0;
 
   // 端末に入っている音声エンジンの質はまちまちなので、名前から品質の高そうな
   // 音声(ネットワーク音声・高品質版など)を優先的にデフォルト選択する
@@ -138,6 +146,32 @@
   // 端末に日本語音声が1つも無い場合はここでtrueにならないため、
   // 「端末組み込みの音声を使用しています」というヒントだけが表示され
   // 実際には選択肢が空、という食い違いを防げる。
+  // 表示は必ず playbackState から導出する。個別の代入を散らさないことで、
+  // ボタンの文言と実際の挙動がずれるのを防ぐ。
+  function syncControls() {
+    const playing = playbackState !== "idle";
+    playAllBtn.setAttribute("aria-pressed", String(playing));
+    if (playing) {
+      playAllBtn.textContent = "■ 停止";
+    } else if (resumeFrom > 0 && resumeFrom < articles.length) {
+      playAllBtn.textContent = `▶ ${resumeFrom + 1}件目から再開`;
+    } else {
+      playAllBtn.textContent = "▶ すべて読み上げる";
+    }
+    nextBtn.disabled = playbackState !== "all";
+    if (playbackState === "all" && playQueueIndex >= 0 && articles[playQueueIndex]) {
+      npCount.textContent = `${playQueueIndex + 1} / ${articles.length}`;
+      npTitle.textContent = articles[playQueueIndex].title;
+      nowPlayingBtn.hidden = false;
+    } else if (playbackState === "single" && articles[playQueueIndex]) {
+      npCount.textContent = `${playQueueIndex + 1} / ${articles.length}`;
+      npTitle.textContent = articles[playQueueIndex].title;
+      nowPlayingBtn.hidden = false;
+    } else {
+      nowPlayingBtn.hidden = true;
+    }
+  }
+
   function updateTtsAvailability() {
     const available = ttsAvailable();
     playAllBtn.disabled = !available;
@@ -266,11 +300,22 @@
     if (played && typeof played.catch === "function") played.catch(() => {});
   }
 
+  // クラウド音声には端末音声のようなウォッチドッグが無く、サーバーが応答を
+  // 返さないまま繋ぎっぱなしになると再生が永久に止まってしまう。取得と再生の
+  // どちらにも上限時間を設ける。
+  const TTS_FETCH_TIMEOUT_MS = 15000;
+  const CLOUD_PLAYBACK_MARGIN_MS = 10000;
+  let abortCloudRequest = null;
+
   async function speakOneCloudAttempt(text, token) {
+    const controller = new AbortController();
+    const fetchTimer = setTimeout(() => controller.abort(), TTS_FETCH_TIMEOUT_MS);
+    abortCloudRequest = () => controller.abort();
     try {
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           text,
           voiceName: selectedCloudVoiceName,
@@ -284,18 +329,28 @@
         return { ok: false, retryable: res.status === 429 || res.status >= 500 };
       }
       const blob = await res.blob();
+      clearTimeout(fetchTimer);
+      abortCloudRequest = null;
       if (token !== playToken) return { ok: true }; // 取得中に停止/次の再生が始まった
       const objectUrl = URL.createObjectURL(blob);
       let playbackFailed = false;
       const audio = getSharedAudio();
-      currentAudio = audio;
       await new Promise((resolve) => {
+        let playbackWatchdog = null;
         const finish = () => {
+          clearTimeout(playbackWatchdog);
           audio.onended = null;
           audio.onerror = null;
           stopCurrentAudio = null;
           resolve();
         };
+        // 再生が始まらない/終わらないまま放置されるのを防ぐ
+        playbackWatchdog = setTimeout(() => {
+          console.warn("[news-reader] クラウド音声の再生が終わらないため打ち切ります");
+          playbackFailed = true;
+          audio.pause();
+          finish();
+        }, estimateSpeechMs(text, parseFloat(speedRange.value) || 1) + CLOUD_PLAYBACK_MARGIN_MS);
         audio.onended = finish;
         audio.onerror = () => {
           playbackFailed = true;
@@ -317,12 +372,16 @@
         });
       });
       URL.revokeObjectURL(objectUrl);
-      currentAudio = null;
       if (token !== playToken) return { ok: true }; // 再生中に停止された
       return playbackFailed ? { ok: false, retryable: true } : { ok: true };
     } catch (err) {
+      // 自分で停止したときの abort は失敗ではない
+      if (err && err.name === "AbortError" && token !== playToken) return { ok: true };
       console.error("[news-reader] クラウド音声の取得に失敗しました:", err);
       return { ok: false, retryable: true };
+    } finally {
+      clearTimeout(fetchTimer);
+      abortCloudRequest = null;
     }
   }
 
@@ -374,7 +433,11 @@
     return ((text.length / SPEECH_CHARS_PER_SECOND) * 1000) / (rate || 1);
   }
 
-  function speakUtteranceOnce(text) {
+  // 中断された発話を、待っているPromiseごと即座に片付けるための関数。
+  // interruptPlayback() から呼ぶ。
+  let abortCurrentUtterance = null;
+
+  function speakUtteranceOnce(text, token) {
     return new Promise((resolve) => {
       const rate = parseFloat(speedRange.value) || 1;
       const utterance = new SpeechSynthesisUtterance(text);
@@ -394,10 +457,22 @@
         settled = true;
         clearTimeout(watchdog);
         activeUtterance = null;
+        abortCurrentUtterance = null;
         resolve(result);
       };
 
+      abortCurrentUtterance = () => settle({ ok: false, error: "canceled" });
+
+      // synth.cancel() は「今鳴っているもの」を止めるグローバルな操作なので、
+      // すでに破棄されたチェーンのウォッチドッグが呼ぶと、後から始まった
+      // 別の記事の読み上げを巻き添えで殺してしまう。しかもそれは canceled
+      // として「自分で止めた」扱いになり、失敗マークも付かないまま飛ばされる。
+      // 自分がまだ現役かを必ず確かめてから止める。
       const watchdog = setTimeout(() => {
+        if (token !== playToken) {
+          settle({ ok: false, error: "canceled" });
+          return;
+        }
         timedOut = true;
         synth.cancel(); // 詰まった発話を捨てないと次の発話も始まらない
         settle({ ok: false, error: "timeout" });
@@ -431,7 +506,7 @@
     let timeouts = 0;
     for (let attempt = 0; attempt <= MAX_SPEECH_RETRIES; attempt++) {
       if (token !== playToken) return true;
-      const result = await speakUtteranceOnce(spokenText);
+      const result = await speakUtteranceOnce(spokenText, token);
       if (result.ok) return true;
       if (USER_STOP_SPEECH_ERRORS.has(result.error)) return true;
       if (NON_RETRYABLE_SPEECH_ERRORS.has(result.error)) return false;
@@ -508,11 +583,21 @@
   // 見えることがある。再生中は画面消灯を防ぐことでこれを軽減する。
   // 対応していないブラウザ(古いiOS Safari等)では何もしない。
   let wakeLock = null;
+  // 取得は非同期なので、await している間に停止されることがある。世代番号を見て
+  // 「もう要らなくなっていた」ら即座に返す。これをしないと、再生ボタンを押して
+  // すぐ停止したときにロックが誰にも解放されず、画面が点きっぱなしになる。
+  let wakeLockGen = 0;
 
   async function acquireWakeLock() {
-    if (!("wakeLock" in navigator)) return;
+    if (!("wakeLock" in navigator) || wakeLock) return;
+    const gen = ++wakeLockGen;
     try {
-      wakeLock = await navigator.wakeLock.request("screen");
+      const sentinel = await navigator.wakeLock.request("screen");
+      if (gen !== wakeLockGen) {
+        sentinel.release().catch(() => {});
+        return;
+      }
+      wakeLock = sentinel;
       wakeLock.addEventListener("release", () => {
         wakeLock = null;
       });
@@ -522,6 +607,7 @@
   }
 
   function releaseWakeLock() {
+    wakeLockGen += 1; // 取得中のものがあれば、解決時に破棄させる
     if (wakeLock) {
       wakeLock.release().catch(() => {});
       wakeLock = null;
@@ -531,7 +617,7 @@
   // タブを一瞬離れる等でWake Lockが自動解除された場合、再生中であれば
   // 画面に戻ってきたタイミングで取り直す
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && (isPlayingAll || isPlayingSingle) && !wakeLock) {
+    if (document.visibilityState === "visible" && playbackState !== "idle" && !wakeLock) {
       acquireWakeLock();
     }
   });
@@ -542,20 +628,23 @@
   // リークを防ぐ。
   function interruptPlayback() {
     if (speechSupported) synth.cancel();
+    if (abortCurrentUtterance) abortCurrentUtterance();
+    if (abortCloudRequest) abortCloudRequest();
     if (stopCurrentAudio) stopCurrentAudio();
-    currentAudio = null;
   }
 
-  function stopAll() {
+  function stopAll({ keepPosition = true } = {}) {
     playToken += 1; // 実行中の発話チェーンを無効化する
     interruptPlayback();
     releaseWakeLock();
-    isPlayingAll = false;
-    isPlayingSingle = false;
+    // どこまで読んだかを覚えておく(全記事再生の途中で止めたときだけ)
+    if (keepPosition && playbackState === "all" && playQueueIndex >= 0) {
+      resumeFrom = playQueueIndex;
+    }
+    playbackState = "idle";
     playQueueIndex = -1;
     highlightItem(-1);
-    playAllBtn.textContent = "▶ すべて読み上げる";
-    stopBtn.disabled = true;
+    syncControls();
     setStatus(`${articles.length}件のニュースがあります`);
   }
 
@@ -576,6 +665,7 @@
     }
     const index = playQueueIndex;
     highlightItem(index);
+    syncControls();
     setStatus(`読み上げ中: ${index + 1} / ${articles.length}`);
     speak(buildUtteranceParts(articles[index]), token, {
       onend: (spokenAll) => {
@@ -587,7 +677,8 @@
 
   function finishPlayAll() {
     const failedCount = failedArticleIndexes.size;
-    stopAll();
+    resumeFrom = 0; // 最後まで読み終えたので次は先頭から
+    stopAll({ keepPosition: false });
     if (failedCount > 0) {
       setStatus(`読み上げが終わりました(${failedCount}件は音声を再生できませんでした)`);
     }
@@ -605,12 +696,29 @@
     unlockAudioPlayback(); // ボタンを押したこの場で <audio> 要素を解錠しておく
     clearFailureMarks();
     acquireWakeLock();
-    isPlayingAll = true;
-    isPlayingSingle = false;
-    playQueueIndex = -1;
-    playAllBtn.textContent = "⏸ 読み上げ中...";
-    stopBtn.disabled = false;
+    playbackState = "all";
+    // 前回止めたところから再開する(playNextInQueue が +1 するので1つ手前を入れる)
+    playQueueIndex = (resumeFrom > 0 && resumeFrom < articles.length ? resumeFrom : 0) - 1;
+    syncControls();
     playNextInQueue(token);
+  }
+
+  // 「この記事は興味ない」を1タップで飛ばせるようにする。停止して探して
+  // 個別再生、という3手順を踏まなくて済む。
+  function skipToNext() {
+    if (playbackState !== "all") return;
+    playToken += 1;
+    const token = playToken;
+    interruptPlayback();
+    // playQueueIndex はそのままにしておき、playNextInQueue に +1 させる
+    setTimeout(() => playNextInQueue(token), 0);
+  }
+
+  // 読み上げ中の記事へ手動で戻る。自動スクロールはしない方針なので、
+  // 「押せば戻れる」手段だけを用意する。
+  function scrollToCurrent() {
+    const el = newsList.children[playQueueIndex];
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function playSingle(index) {
@@ -623,16 +731,16 @@
     interruptPlayback();
     unlockAudioPlayback(); // ボタンを押したこの場で <audio> 要素を解錠しておく
     acquireWakeLock();
-    isPlayingAll = false;
-    isPlayingSingle = true;
+    playbackState = "single";
+    playQueueIndex = index;
     highlightItem(index);
-    stopBtn.disabled = false;
+    syncControls();
     setStatus(`読み上げ中: 記事 ${index + 1}`);
     speak(buildUtteranceParts(articles[index]), token, {
       onend: (spokenAll) => {
         if (!spokenAll) markArticleFailed(index);
-        if (token !== playToken || !isPlayingSingle) return;
-        stopAll();
+        if (token !== playToken || playbackState !== "single") return;
+        stopAll({ keepPosition: false });
         if (!spokenAll) setStatus("この記事の音声を再生できませんでした。もう一度お試しください。");
       },
     });
@@ -663,16 +771,23 @@
       playBtn.className = "btn";
       playBtn.type = "button";
       playBtn.textContent = "🔊 この記事を読む";
+      playBtn.setAttribute("aria-label", `「${article.title}」を読み上げる`);
       playBtn.addEventListener("click", () => playSingle(index));
 
-      const link = document.createElement("a");
-      link.className = "btn news-link";
-      link.href = article.link;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = "記事を開く";
+      actions.append(playBtn);
 
-      actions.append(playBtn, link);
+      // http/https 以外のリンクはそもそも <a> にしない
+      const safeLink = sanitizeLinkUrl(article.link);
+      if (safeLink) {
+        const link = document.createElement("a");
+        link.className = "btn news-link";
+        link.href = safeLink;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "記事を開く";
+        link.setAttribute("aria-label", `「${article.title}」の記事を新しいタブで開く`);
+        actions.append(link);
+      }
       li.append(top, title, summary, actions);
       newsList.appendChild(li);
     });
@@ -685,6 +800,19 @@
 
   function normalizeTitle(title) {
     return (title || "").trim().toLowerCase();
+  }
+
+  // 記事リンクは外部のRSS由来で、ブラウザ単体モードでは第三者のCORSプロキシも
+  // 挟まる。javascript: などをそのまま href に入れるとXSSの入口になるので、
+  // http/https だけを通す(画像URLと同じ考え方)。
+  function sanitizeLinkUrl(url) {
+    if (typeof url !== "string") return null;
+    try {
+      const parsed = new URL(url.trim(), location.href);
+      return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : null;
+    } catch {
+      return null;
+    }
   }
 
   // server.js が動いている場合はそちらを優先する(自前サーバーなので信頼性が高い)。
@@ -724,7 +852,7 @@
     if (doc.querySelector("parsererror")) throw new Error("XML parse error");
     return Array.from(doc.querySelectorAll("item")).map((item) => ({
       title: (item.querySelector("title")?.textContent || "").trim(),
-      link: (item.querySelector("link")?.textContent || "").trim(),
+      link: sanitizeLinkUrl(item.querySelector("link")?.textContent || "") || "",
       source: sourceName,
       pubDate: item.querySelector("pubDate")?.textContent?.trim() || null,
       summary: stripHtml(item.querySelector("description")?.textContent || ""),
@@ -809,6 +937,7 @@
         (await fetchFromOwnApi(forceRefresh)) || (await fetchNewsClientSide(forceRefresh));
       articles = data.articles || [];
       renderArticles();
+      syncControls();
       if (articles.length > 0) {
         setStatus(`${articles.length}件のニュースがあります`);
       } else if (typeof data.sourcesOk === "number" && data.sourcesOk === 0) {
@@ -830,17 +959,19 @@
   }
 
   playAllBtn.addEventListener("click", () => {
-    if (isPlayingAll) {
+    if (playbackState !== "idle") {
       stopAll();
     } else {
       startPlayAll();
     }
   });
 
-  stopBtn.addEventListener("click", stopAll);
+  nextBtn.addEventListener("click", skipToNext);
+  nowPlayingBtn.addEventListener("click", scrollToCurrent);
 
   refreshBtn.addEventListener("click", () => {
-    stopAll();
+    resumeFrom = 0; // 一覧が入れ替わるので、再開位置は持ち越さない
+    stopAll({ keepPosition: false });
     loadNews({ forceRefresh: true });
   });
 
@@ -867,8 +998,9 @@
   });
 
   voiceTestBtn.addEventListener("click", () => {
-    playToken += 1;
-    interruptPlayback();
+    // 全記事再生中に試聴すると、以前はチェーンだけ無効化されて画面は
+    // 「読み上げ中」のまま固まっていた。先に停止して状態を揃える。
+    stopAll();
     unlockAudioPlayback();
     speak(["これはテスト再生です。ニュースはこのような声で読み上げられます。"], playToken);
   });
@@ -877,7 +1009,10 @@
 
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
-      navigator.serviceWorker.register("service-worker.js").catch(() => {});
+      navigator.serviceWorker.register("service-worker.js").catch((err) => {
+        // 握り潰すと、キャッシュ対象が404でinstallが失敗していても誰も気づけない
+        console.warn("[news-reader] Service Workerの登録に失敗しました:", err);
+      });
     });
   }
 })();
