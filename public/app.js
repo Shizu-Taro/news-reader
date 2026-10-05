@@ -25,6 +25,8 @@
   const CACHE_KEY = "news-reader-cache-v1";
   const CACHE_TTL_MS = 5 * 60 * 1000;
   const MAX_ARTICLES = 40;
+  // 「最新ニュース」なので、これより古い記事は一覧に出さない(サーバー側と同じ基準)
+  const MAX_ARTICLE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
   const FEEDS = [
     { url: "https://www3.nhk.or.jp/rss/news/cat0.xml", source: "NHKニュース" },
     { url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml", source: "Yahoo!ニュース" },
@@ -228,7 +230,10 @@
     if (!iso) return "";
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return "";
+    // 今年以外の記事は「8/8」とだけ出ると今年のものと区別がつかないので年を付ける
+    const isThisYear = d.getFullYear() === new Date().getFullYear();
     return d.toLocaleString("ja-JP", {
+      year: isThisYear ? undefined : "numeric",
       month: "numeric",
       day: "numeric",
       hour: "2-digit",
@@ -802,6 +807,17 @@
     return (title || "").trim().toLowerCase();
   }
 
+  // 日付が取れない記事は古いかどうか判断できないので残す(判断できるものだけ落とす)
+  function dropStaleArticles(articles) {
+    const now = Date.now();
+    return articles.filter((article) => {
+      if (!article.pubDate) return true;
+      const published = new Date(article.pubDate).getTime();
+      if (Number.isNaN(published)) return true;
+      return now - published <= MAX_ARTICLE_AGE_MS;
+    });
+  }
+
   // 記事リンクは外部のRSS由来で、ブラウザ単体モードでは第三者のCORSプロキシも
   // 挟まる。javascript: などをそのまま href に入れるとXSSの入口になるので、
   // http/https だけを通す(画像URLと同じ考え方)。
@@ -872,7 +888,7 @@
       deduped.push(article);
     }
 
-    const filtered = deduped.filter(
+    const filtered = dropStaleArticles(deduped).filter(
       (article) =>
         !window.NewsFilter.isCrimeArticle(article.title) &&
         !window.NewsFilter.isCrimeArticle(article.summary)
@@ -911,7 +927,10 @@
     if (!forceRefresh) {
       const cached = readCache();
       if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-        return { updatedAt: new Date(cached.fetchedAt).toISOString(), articles: cached.articles };
+        return {
+          updatedAt: new Date(cached.fetchedAt).toISOString(),
+          articles: dropStaleArticles(cached.articles || []),
+        };
       }
     }
 
@@ -935,7 +954,10 @@
     try {
       const data =
         (await fetchFromOwnApi(forceRefresh)) || (await fetchNewsClientSide(forceRefresh));
-      articles = data.articles || [];
+      // 自前APIから来た記事もプロキシ経由で来た記事も、ここで一度ふるいにかける。
+      // GitHub Pages版(このファイル)とRender版(server.js)は別々に更新されるので、
+      // 片方が古くても古い記事が出ないようにしておく。
+      articles = dropStaleArticles(data.articles || []);
       renderArticles();
       syncControls();
       if (articles.length > 0) {

@@ -10,6 +10,9 @@ const PORT = process.env.PORT || 3000;
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5分キャッシュ
 const FAILED_CACHE_TTL_MS = 30 * 1000; // 取得に失敗しているときの再挑戦間隔
 const MAX_ARTICLES = 40;
+// 「最新ニュース」なので、これより古い記事は一覧に出さない。
+// 取得元が古い記事を配り続けても、いつまでも残り続けないようにする。
+const MAX_ARTICLE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const GOOGLE_TTS_API_KEY = process.env.GOOGLE_TTS_API_KEY || "";
 const TTS_CACHE_MAX_ENTRIES = 200;
 
@@ -49,6 +52,19 @@ function sanitizeLink(url) {
   }
 }
 
+// 日付が取れない記事は古いかどうか判断できないので残す(判断できるものだけ落とす)
+function isFreshArticle(article, now) {
+  if (!article.pubDate) return true;
+  const published = new Date(article.pubDate).getTime();
+  if (Number.isNaN(published)) return true;
+  return now - published <= MAX_ARTICLE_AGE_MS;
+}
+
+function dropStaleArticles(articles) {
+  const now = Date.now();
+  return articles.filter((article) => isFreshArticle(article, now));
+}
+
 async function fetchFeed(feed) {
   try {
     const parsed = await parser.parseURL(feed.url);
@@ -84,7 +100,7 @@ async function fetchAllNews() {
     deduped.push(article);
   }
 
-  const filtered = deduped.filter(
+  const filtered = dropStaleArticles(deduped).filter(
     (article) => !isCrimeArticle(article.title) && !isCrimeArticle(article.summary)
   );
 
@@ -261,10 +277,14 @@ app.get("/api/news", async (req, res) => {
   try {
     const forceRefresh = req.query.refresh === "1";
     const { fetchedAt, articles, sourcesOk, sourcesTotal } = await getNews({ forceRefresh });
+    // 取得に失敗している間は前回のキャッシュを配り続けるので、配る直前にも
+    // 古さを見る。こうしないと、上流が止まったまま何日経っても古い記事が
+    // 残り続けてしまう。
+    const fresh = dropStaleArticles(articles);
     res.json({
       updatedAt: new Date(fetchedAt).toISOString(),
-      count: articles.length,
-      articles,
+      count: fresh.length,
+      articles: fresh,
       sourcesOk,
       sourcesTotal,
     });
