@@ -5,6 +5,7 @@
   const npCount = document.getElementById("np-count");
   const npTitle = document.getElementById("np-title");
   const settingsEl = document.getElementById("settings");
+  const settingsWarning = document.getElementById("settings-warning");
   const refreshBtn = document.getElementById("refresh-btn");
   const speedRange = document.getElementById("speed-range");
   const speedValue = document.getElementById("speed-value");
@@ -29,7 +30,6 @@
   const MAX_ARTICLE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
   const FEEDS = [
     { url: "https://www3.nhk.or.jp/rss/news/cat0.xml", source: "NHKニュース" },
-    { url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml", source: "Yahoo!ニュース" },
     { url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja", source: "Googleニュース" },
   ];
   const CORS_PROXIES = [
@@ -46,6 +46,9 @@
   let cloudVoices = []; // server.js の /api/tts/voices から取得した実際の日本語ボイス一覧
   let selectedCloudVoiceName = null;
   let ttsMode = "device"; // "cloud" | "device"
+  // 自前サーバーはあるのに Google Cloud の音声が使えなかったときの理由。
+  // GitHub Pages のようにサーバー自体が無い場合は null のまま。
+  let cloudFailureReason = null;
   let stopCurrentAudio = null; // 再生中のクラウド音声を強制停止するための関数
   // 再生状態は1つの変数で持つ。以前は isPlayingAll / isPlayingSingle /
   // ボタンの文言 の3つに散っていて、個別再生中にボタンだけ「読み上げ中」の
@@ -132,16 +135,40 @@
   // server.js の /api/tts/voices からGoogle Cloud TTSの実際の日本語ボイス
   // 一覧を取得する。取得できればそれ自体が「利用可能」の判定にもなる
   // (APIキー未設定なら501、サーバーが無ければfetch自体が失敗する)
+  // 成功すれば { voices }、失敗すれば { failure } を返す。failure は画面に出す
+  // 原因の説明で、サーバー自体が無い(GitHub Pages など)ときは null。
+  // 以前は失敗の理由を捨てて null を返していたため、Render でキーが壊れていても
+  // 黙って端末の音声に切り替わり、何が起きているのか分からなかった。
   async function fetchCloudVoices() {
-    try {
-      const res = await fetch("/api/tts/voices");
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (!data || !Array.isArray(data.voices) || data.voices.length === 0) return null;
-      return data.voices;
-    } catch {
-      return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let res;
+      try {
+        res = await fetch("/api/tts/voices");
+      } catch {
+        return { failure: null };
+      }
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        // 静的ホスティングの404ページなど、JSONでない応答
+      }
+      if (res.ok && data && Array.isArray(data.voices) && data.voices.length > 0) {
+        return { voices: data.voices };
+      }
+      // 自前のAPIが返したエラーでなければ、そもそもサーバーが無い
+      if (!data || typeof data.error !== "string") return { failure: null };
+      if (res.status === 501) {
+        return { failure: "サーバーに GOOGLE_TTS_API_KEY が設定されていません。" };
+      }
+      // 一時的な失敗なら一度だけ取り直す(キーの設定ミスなどは何度やっても同じ)
+      if (data.retryable && attempt === 0) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      return { failure: data.message || data.error };
     }
+    return { failure: "Google Cloud の音声一覧を取得できませんでした。" };
   }
 
   // ボタン類の有効/無効を、実際に読み上げが使える状態かどうかに合わせて更新する。
@@ -189,6 +216,8 @@
     if (japaneseVoices.length === 0) {
       voiceModeHint.textContent =
         "この端末で使える日本語の読み上げ音声が見つかりませんでした。端末の設定で日本語音声をダウンロードしてください。";
+    } else if (cloudFailureReason) {
+      voiceModeHint.textContent = `Google Cloud の音声が使えないため、端末の音声で読み上げています。原因: ${cloudFailureReason}`;
     } else {
       voiceModeHint.textContent =
         "端末組み込みの音声を使用しています(自前サーバーでGOOGLE_TTS_API_KEYを設定すると、より自然な音声が使えます)";
@@ -197,15 +226,20 @@
   }
 
   async function initVoiceMode() {
-    const voices = await fetchCloudVoices();
-    if (voices) {
+    const result = await fetchCloudVoices();
+    if (result.voices) {
       ttsMode = "cloud";
-      cloudVoices = sortVoicesByQuality(voices);
+      cloudFailureReason = null;
+      settingsWarning.hidden = true;
+      cloudVoices = sortVoicesByQuality(result.voices);
       populateCloudVoiceList();
       voiceModeHint.textContent = "Google Cloudの高品質な音声を使用しています";
       updateTtsAvailability();
     } else {
       ttsMode = "device";
+      cloudFailureReason = result.failure;
+      // 設定は畳んであるので、本来の音声が使えていないことは畳んだままでも分かるようにする
+      settingsWarning.hidden = !cloudFailureReason;
       if (speechSupported) {
         refreshDeviceVoiceState();
       } else {
@@ -329,9 +363,15 @@
         }),
       });
       if (!res.ok) {
-        // 429(レート制限)や5xx(サーバー側の一時的な問題)は再試行の価値がある。
-        // 400番台(不正なリクエスト等)は再試行しても無駄なので諦める。
-        return { ok: false, retryable: res.status === 429 || res.status >= 500 };
+        // サーバーが理由を返していればそれに従う(APIキーの設定ミスなどは何度
+        // 試しても同じなので、無駄に3往復させない)。返していなければ、429や
+        // 5xx は一時的な問題とみなして再試行する。
+        const body = await res.json().catch(() => null);
+        const retryable =
+          body && typeof body.retryable === "boolean"
+            ? body.retryable
+            : res.status === 429 || res.status >= 500;
+        return { ok: false, retryable };
       }
       const blob = await res.blob();
       clearTimeout(fetchTimer);

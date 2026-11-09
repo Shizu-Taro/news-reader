@@ -19,7 +19,6 @@ const TTS_CACHE_MAX_ENTRIES = 200;
 // 複数のRSSフィードを組み合わせて取得する
 const FEEDS = [
   { url: "https://www3.nhk.or.jp/rss/news/cat0.xml", source: "NHKニュース" },
-  { url: "https://news.yahoo.co.jp/rss/topics/top-picks.xml", source: "Yahoo!ニュース" },
   { url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja", source: "Googleニュース" },
 ];
 
@@ -154,6 +153,59 @@ const FALLBACK_TTS_VOICES = new Set([
   "ja-JP-Wavenet-D",
 ]);
 const DEFAULT_TTS_VOICE = "ja-JP-Neural2-B";
+const GOOGLE_API_TIMEOUT_MS = 10000;
+
+// Google Cloud が返すエラーの理由コードごとに、利用者が何を直せばよいかを
+// 日本語で返す。以前はどんな理由でも一律「失敗しました」の502にしていたため、
+// キーが無効なのか、制限に引っかかっているのか、APIが無効なのかが外から
+// 分からず、画面上は黙って端末の音声に切り替わるだけだった。
+const GOOGLE_ERROR_GUIDE = {
+  API_KEY_INVALID:
+    "APIキーが無効です。Render の環境変数 GOOGLE_TTS_API_KEY が、Google Cloud で現在有効なキーと一致しているか確認してください(キーを再発行した場合、古いキーのままになっていないか)。",
+  API_KEY_EXPIRED:
+    "APIキーの有効期限が切れています。Google Cloud でキーを再発行し、Render の GOOGLE_TTS_API_KEY を更新してください。",
+  API_KEY_SERVICE_BLOCKED:
+    "APIキーの「APIの制限」で Cloud Text-to-Speech API が許可されていません。Google Cloud のキー設定で、許可するAPIに追加してください。",
+  API_KEY_HTTP_REFERRER_BLOCKED:
+    "APIキーに「ウェブサイト」の制限がかかっているため、サーバーからの呼び出しが拒否されています。このキーはサーバー内だけで使うので、アプリケーションの制限を「なし」にしてください。",
+  API_KEY_IP_ADDRESS_BLOCKED:
+    "APIキーに「IPアドレス」の制限がかかっており、Render のサーバーからの呼び出しが拒否されています。アプリケーションの制限を外してください。",
+  SERVICE_DISABLED:
+    "Google Cloud のプロジェクトで Cloud Text-to-Speech API が有効になっていません。「APIとサービス」→「ライブラリ」で有効化してください。",
+  BILLING_DISABLED:
+    "Google Cloud のプロジェクトで請求先アカウントが無効になっています。お支払いの設定を確認してください。",
+  RATE_LIMIT_EXCEEDED: "Google Cloud の利用上限に一時的に達しました。しばらくしてから再度お試しください。",
+};
+
+class GoogleApiError extends Error {
+  constructor(httpStatus, body) {
+    let detail = null;
+    try {
+      detail = JSON.parse(body).error;
+    } catch {
+      // JSON でない応答はそのまま扱う
+    }
+    const reason =
+      (detail && Array.isArray(detail.details) && detail.details.find((d) => d && d.reason)?.reason) ||
+      (detail && detail.status) ||
+      `HTTP_${httpStatus}`;
+    // 生のメッセージはサーバーのログにだけ残す(利用者には reason と説明だけ返す)
+    super(`Google API ${httpStatus} ${reason}: ${String((detail && detail.message) || body).slice(0, 300)}`);
+    this.reason = reason;
+    this.retryable = httpStatus === 429 || httpStatus >= 500;
+  }
+}
+
+function describeGoogleError(err) {
+  if (err instanceof GoogleApiError) {
+    return {
+      reason: err.reason,
+      message: GOOGLE_ERROR_GUIDE[err.reason] || `Google Cloud がエラーを返しました(${err.reason})。`,
+      retryable: err.retryable,
+    };
+  }
+  return { reason: "NETWORK_ERROR", message: "Google Cloud に接続できませんでした。", retryable: true };
+}
 const VOICE_LIST_TTL_MS = 60 * 60 * 1000; // 1時間キャッシュ(声の一覧は頻繁には変わらない)
 
 let voiceListCache = { fetchedAt: 0, voices: [] };
@@ -167,10 +219,9 @@ async function fetchAvailableVoices() {
   }
 
   const url = `https://texttospeech.googleapis.com/v1/voices?languageCode=ja-JP&key=${GOOGLE_TTS_API_KEY}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS) });
   if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(`List voices failed ${res.status}: ${errBody.slice(0, 300)}`);
+    throw new GoogleApiError(res.status, await res.text().catch(() => ""));
   }
   const data = await res.json();
   const voices = (data.voices || [])
@@ -231,6 +282,7 @@ async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(GOOGLE_API_TIMEOUT_MS),
     body: JSON.stringify({
       input: { text: spacesToComma(text) },
       voice: { languageCode: "ja-JP", name: voiceName },
@@ -239,8 +291,7 @@ async function synthesizeSpeech({ text, voiceName, speakingRate, pitch }) {
   });
 
   if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    throw new Error(`Google TTS API error ${res.status}: ${errBody.slice(0, 300)}`);
+    throw new GoogleApiError(res.status, await res.text().catch(() => ""));
   }
 
   const data = await res.json();
@@ -303,8 +354,8 @@ app.get("/api/tts/voices", async (req, res) => {
     const voices = await fetchAvailableVoices();
     res.json({ voices });
   } catch (err) {
-    console.error("[news-reader] /api/tts/voices エラー:", err);
-    res.status(502).json({ error: "音声一覧の取得に失敗しました" });
+    console.error("[news-reader] /api/tts/voices エラー:", err.message);
+    res.status(502).json({ error: "音声一覧の取得に失敗しました", ...describeGoogleError(err) });
   }
 });
 
@@ -331,7 +382,7 @@ app.post("/api/tts", async (req, res) => {
       voiceName = voices[0].name;
     }
   } catch (err) {
-    console.error("[news-reader] 音声一覧の取得に失敗したためフォールバックします:", err);
+    console.error("[news-reader] 音声一覧の取得に失敗したためフォールバックします:", err.message);
     if (FALLBACK_TTS_VOICES.has(requestedVoice)) voiceName = requestedVoice;
   }
 
@@ -351,8 +402,8 @@ app.post("/api/tts", async (req, res) => {
     res.set("Content-Type", "audio/mpeg");
     res.send(audioBuffer);
   } catch (err) {
-    console.error("[news-reader] /api/tts エラー:", err);
-    res.status(502).json({ error: "音声合成に失敗しました" });
+    console.error("[news-reader] /api/tts エラー:", err.message);
+    res.status(502).json({ error: "音声合成に失敗しました", ...describeGoogleError(err) });
   }
 });
 
