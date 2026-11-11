@@ -29,7 +29,10 @@
   // 「最新ニュース」なので、これより古い記事は一覧に出さない(サーバー側と同じ基準)
   const MAX_ARTICLE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
   const FEEDS = [
-    { url: "https://www3.nhk.or.jp/rss/news/cat0.xml", source: "NHKニュース" },
+    // NHKニュースは news.web.nhk に移転しており、旧URL(www3.nhk.or.jp/rss/news/)の
+    // フィードは2026年8月8日で更新が止まっている。旧URLのままだと8月8日の記事が
+    // 配られ続け、古い記事の除外によってNHKの記事が1件も出なくなっていた。
+    { url: "https://news.web.nhk/n-data/conf/na/rss/cat0.xml", source: "NHKニュース" },
     { url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja", source: "Googleニュース" },
   ];
   const CORS_PROXIES = [

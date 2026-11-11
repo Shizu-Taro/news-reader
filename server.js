@@ -18,7 +18,10 @@ const TTS_CACHE_MAX_ENTRIES = 200;
 
 // 複数のRSSフィードを組み合わせて取得する
 const FEEDS = [
-  { url: "https://www3.nhk.or.jp/rss/news/cat0.xml", source: "NHKニュース" },
+  // NHKニュースは news.web.nhk に移転しており、旧URL(www3.nhk.or.jp/rss/news/)の
+  // フィードは2026年8月8日で更新が止まっている。旧URLのままだと8月8日の記事が
+  // 配られ続け、古い記事の除外によってNHKの記事が1件も出なくなっていた。
+  { url: "https://news.web.nhk/n-data/conf/na/rss/cat0.xml", source: "NHKニュース" },
   { url: "https://news.google.com/rss?hl=ja&gl=JP&ceid=JP:ja", source: "Googleニュース" },
 ];
 
